@@ -1,0 +1,48 @@
+# =============================================================================
+# competition_rules.yaml — 评分细则 / 高度约定 / 阶段时限
+# 细则更新时只改本文件。
+# =============================================================================
+
+time_limit_s: 600          # 科目总时限
+phase_timeout_s: 60        # P3 起飞阶段超时（含错峰延迟）
+takeoff_stagger_s: 3.0     # 多机错峰起飞间隔(s)：drone i 延迟 i*stagger
+entry_stagger_s: 2.5       # P4 进入林区错峰间隔(s)：drone i 延迟 i*stagger（避免六机同挤入口）
+return_stagger_s: 3.0      # 返航错峰间隔(s)：drone i 投放后延迟 i*stagger 再返航（避免六机同挤返航走廊互撞）
+
+# ---- 飞行高度约定 ----------------------------------------------------------
+heights:
+  takeoff_hover_z: 1.5     # 起降区悬停
+  cruise_z: 2.5            # 穿越区平飞（树冠之上）
+  identify_z: 1.2          # 投放点正上方识别高度
+  drop_arrival_tol: 0.8    # 投放点水平到位阈值(m)
+  area_arrival_tol: 2.0    # 区域到位阈值(m)
+
+# ---- 运动限制 ---------------------------------------------------------------
+motion:
+  default_max_vel: 2.0
+  default_max_acc: 4.0
+  cruise_above_canopy: true   # 若 false 则切"穿隙"模式（需配 forest.trunk_spacing）
+
+# ---- 类型匹配安全策略（重写旧平台思路） -------------------------------------
+type_match:
+  min_confidence: 0.8      # P1 置信度门槛
+  consecutive_frames: 3    # P2 连续帧确认
+  hover_timeout_s: 12.0    # P3 悬停超时
+  unknown_tag_policy: ignore   # P4 未知 tag：ignore | abort
+  position_gate: true      # P5 位置门限（必须在投放点 tol 内才匹配）
+
+# ---- 投放点 Tag 检测参数 ------------------------------------------------------
+tag_detection:
+  tag_range: 4.0
+  fov_deg: 60.0
+  occlusion: true          # 立木遮挡参与判定
+
+# ---- 计分规则 ---------------------------------------------------------------
+score:
+  TYPE_A: 10
+  TYPE_B: 15
+  TYPE_C: 20
+  TYPE_D: 25
+  TYPE_E: 30
+  wrong_drop_penalty: 0
+tiebreak: [total_score, completion_time, first_correct_drop_time]

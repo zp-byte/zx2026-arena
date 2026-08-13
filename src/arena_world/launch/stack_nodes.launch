@@ -1,0 +1,76 @@
+<launch>
+  <!-- 任务/感知/导航/计分 节点栈（与物理后端无关）。
+       由 zx2026_all.launch（python 后端）与 arena_world_gazebo/gazebo.launch（gzserver）共用。
+       物理后端只负责：/drone_<id>/vel_cmd → /drone_<id>/odom + /tf + /clock。
+  -->
+
+  <!-- 编队就绪 -->
+  <node pkg="arena_fleet" type="fleet_node.py" name="fleet_node" output="screen"/>
+
+  <!-- 感知：每机 1 份 tag 检测 + lidar -->
+  <node pkg="arena_sensor" type="tag_detector_node.py" name="tag_detector_0" output="log">
+    <param name="drone_id" value="0"/>
+  </node>
+  <node pkg="arena_sensor" type="tag_detector_node.py" name="tag_detector_1" output="log">
+    <param name="drone_id" value="1"/>
+  </node>
+  <node pkg="arena_sensor" type="tag_detector_node.py" name="tag_detector_2" output="log">
+    <param name="drone_id" value="2"/>
+  </node>
+  <node pkg="arena_sensor" type="tag_detector_node.py" name="tag_detector_3" output="log">
+    <param name="drone_id" value="3"/>
+  </node>
+  <node pkg="arena_sensor" type="tag_detector_node.py" name="tag_detector_4" output="log">
+    <param name="drone_id" value="4"/>
+  </node>
+  <node pkg="arena_sensor" type="tag_detector_node.py" name="tag_detector_5" output="log">
+    <param name="drone_id" value="5"/>
+  </node>
+
+  <!-- 导航：每机 1 份 -->
+  <node pkg="arena_nav" type="nav_node.py" name="nav_node_0" output="log">
+    <param name="drone_id" value="0"/>
+  </node>
+  <node pkg="arena_nav" type="nav_node.py" name="nav_node_1" output="log">
+    <param name="drone_id" value="1"/>
+  </node>
+  <node pkg="arena_nav" type="nav_node.py" name="nav_node_2" output="log">
+    <param name="drone_id" value="2"/>
+  </node>
+  <node pkg="arena_nav" type="nav_node.py" name="nav_node_3" output="log">
+    <param name="drone_id" value="3"/>
+  </node>
+  <node pkg="arena_nav" type="nav_node.py" name="nav_node_4" output="log">
+    <param name="drone_id" value="4"/>
+  </node>
+  <node pkg="arena_nav" type="nav_node.py" name="nav_node_5" output="log">
+    <param name="drone_id" value="5"/>
+  </node>
+
+  <!-- 任务：每机 1 份执行器 + 全局节点 -->
+  <node pkg="arena_mission" type="mission_executor_node.py" name="executor_0" output="log">
+    <param name="drone_id" value="0"/>
+  </node>
+  <node pkg="arena_mission" type="mission_executor_node.py" name="executor_1" output="log">
+    <param name="drone_id" value="1"/>
+  </node>
+  <node pkg="arena_mission" type="mission_executor_node.py" name="executor_2" output="log">
+    <param name="drone_id" value="2"/>
+  </node>
+  <node pkg="arena_mission" type="mission_executor_node.py" name="executor_3" output="log">
+    <param name="drone_id" value="3"/>
+  </node>
+  <node pkg="arena_mission" type="mission_executor_node.py" name="executor_4" output="log">
+    <param name="drone_id" value="4"/>
+  </node>
+  <node pkg="arena_mission" type="mission_executor_node.py" name="executor_5" output="log">
+    <param name="drone_id" value="5"/>
+  </node>
+  <node pkg="arena_mission" type="task_generator_node.py" name="task_generator" output="screen"/>
+  <node pkg="arena_mission" type="type_match_node.py" name="type_match_node" output="screen"/>
+  <node pkg="arena_mission" type="drop_simulator_node.py" name="drop_simulator_node" output="screen"/>
+  <node pkg="arena_mission" type="stage_controller_node.py" name="stage_controller" output="screen"/>
+
+  <!-- 计分 -->
+  <node pkg="arena_score" type="scorekeeper_node.py" name="scorekeeper" output="screen"/>
+</launch>

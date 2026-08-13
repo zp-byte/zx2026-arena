@@ -1,0 +1,13 @@
+<launch>
+  <!-- 智信2026科目三 新仿真平台 一键启动（python 物理后端，端口 11411）
+       用法: roslaunch arena_world zx2026_all.launch
+       之后: rosservice call /zx2026/start 开始比赛
+       Gazebo 物理后端请用: roslaunch arena_world_gazebo gazebo.launch
+  -->
+
+  <!-- 场景 + 主仿真循环（6 机动力学/碰撞/时钟/TF） -->
+  <node pkg="arena_world" type="world_node.py" name="world_node" output="screen"/>
+
+  <!-- 任务/感知/导航/计分 节点栈（与后端无关） -->
+  <include file="$(find arena_world)/launch/stack_nodes.launch"/>
+</launch>

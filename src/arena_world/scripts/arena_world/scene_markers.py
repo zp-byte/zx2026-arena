@@ -1,0 +1,89 @@
+# -*- coding: utf-8 -*-
+"""arena_world::scene_markers — 从 Scene 构建静态场景消息（PoseArray + MarkerArray）。
+
+python 后端由 world_node 调用，Gazebo 后端由 scene_marker_node 调用：
+同一份森林/投放点/区域描述，确保两种物理后端在 RViz 里看到完全一致的场景。
+"""
+from geometry_msgs.msg import PoseArray, Pose, Point
+from visualization_msgs.msg import Marker, MarkerArray
+
+
+def build_scene_messages(scene):
+    """返回 (PoseArray, MarkerArray)：投放点列表 + RViz 森林/区域/投放点标记。"""
+    # 投放点 PoseArray
+    pa = PoseArray()
+    pa.header.frame_id = "world"
+    pa.header.stamp.secs = 0
+    for dp in scene.drop_points:
+        p = Pose()
+        p.position = Point(dp.xyz[0], dp.xyz[1], dp.xyz[2])
+        p.orientation.w = 1.0
+        pa.poses.append(p)
+
+    # RViz MarkerArray
+    ma = MarkerArray()
+    colors = {"check_in": (1, 1, 0), "waiting": (1, 0.5, 0),
+              "takeoff": (0, 1, 0), "transit": (0, 0.8, 0.3), "return": (0, 1, 0)}
+    mid = 0
+    vis = scene.scene_cfg.get("visual", {})
+    ground_z = scene.venue["ground_z"]
+    for z in scene.zones.values():
+        if z.kind == "forest":
+            continue  # 森林用柱子标记
+        mk = Marker()
+        mk.header.frame_id = "world"
+        mk.ns = "zones"
+        mk.id = mid
+        mid += 1
+        mk.type = Marker.LINE_STRIP
+        mk.action = Marker.ADD
+        mk.scale.x = 0.1
+        col = colors.get(z.id, (0.5, 0.5, 0.5))
+        mk.color.r, mk.color.g, mk.color.b, mk.color.a = col[0], col[1], col[2], 1.0
+        pts = [Point(x, y, ground_z + 0.01) for (x, y) in z.polygon]
+        pts.append(Point(z.polygon[0][0], z.polygon[0][1], ground_z + 0.01))
+        mk.points = pts
+        ma.markers.append(mk)
+
+    # 森林（柱子示意）
+    fs = float(vis.get("forest_marker_scale", [0.3, 0.3, 2.5])[2])
+    ob_count = 0
+    for ob in scene.obstacles:
+        if ob_count > 400:
+            break
+        mk = Marker()
+        mk.header.frame_id = "world"
+        mk.ns = "forest"
+        mk.id = mid
+        mid += 1
+        mk.type = Marker.CUBE
+        mk.action = Marker.ADD
+        cx = (ob.lo[0] + ob.hi[0]) / 2
+        cy = (ob.lo[1] + ob.hi[1]) / 2
+        cz = (ob.lo[2] + ob.hi[2]) / 2
+        mk.pose.position = Point(cx, cy, cz)
+        mk.pose.orientation.w = 1.0
+        mk.scale.x = ob.hi[0] - ob.lo[0]
+        mk.scale.y = ob.hi[1] - ob.lo[1]
+        mk.scale.z = ob.hi[2] - ob.lo[2]
+        mk.color.r, mk.color.g, mk.color.b, mk.color.a = (0.4, 0.6, 0.3, 0.9)
+        ma.markers.append(mk)
+        ob_count += 1
+
+    # 投放点（球）
+    ds = float(vis.get("drop_marker_scale", [0.6, 0.6, 0.3])[0])
+    for dp in scene.drop_points:
+        mk = Marker()
+        mk.header.frame_id = "world"
+        mk.ns = "drop_points"
+        mk.id = mid
+        mid += 1
+        mk.type = Marker.SPHERE
+        mk.action = Marker.ADD
+        mk.pose.position = Point(dp.xyz[0], dp.xyz[1], ground_z + ds / 2)
+        mk.pose.orientation.w = 1.0
+        mk.scale.x = mk.scale.y = mk.scale.z = ds
+        mk.color.r, mk.color.g, mk.color.b, mk.color.a = (1, 0.2, 0.2, 1.0)
+        ma.markers.append(mk)
+
+    return pa, ma

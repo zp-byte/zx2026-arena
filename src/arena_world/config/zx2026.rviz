@@ -1,0 +1,181 @@
+# 智信2026科目三 新仿真平台 RViz 视图
+# 固定系 world；显示：Grid + 场景 Marker（分区/密林/投放点）+ TF 机体坐标轴
+#       + 6 机 Odometry 位姿箭头 + 飞行轨迹 Path
+Panels:
+  - Class: rviz/Displays
+    Help Height: 80
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Scene1
+        - /Drones1
+      Splitter Ratio: 0.55
+    Tree Height: 560
+  - Class: rviz/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz/Grid
+      Enabled: true
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: world
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: false
+      Name: Scene (zones/forest/drops)
+      Namespaces:
+        zones: true
+        forest: true
+        drop_points: true
+      Queue Size: 10
+      Topic: /zx2026/markers
+      Value: false
+    - Class: rviz/TF
+      Enabled: true
+      Frame Timeout: 5
+      Frames:
+        All Enabled: true
+      Marker Scale: 2
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        drone_0:
+          world: {}
+        drone_1:
+          world: {}
+        drone_2:
+          world: {}
+        drone_3:
+          world: {}
+        drone_4:
+          world: {}
+        drone_5:
+          world: {}
+      Update Interval: 0.2
+      Value: true
+    - Class: rviz/Odometry
+      Enabled: true
+      Name: drone0
+      Position Tolerance: 0.1
+      Topic: /drone_0/odom
+      Value: true
+    - Class: rviz/Odometry
+      Enabled: true
+      Name: drone1
+      Position Tolerance: 0.1
+      Topic: /drone_1/odom
+      Value: true
+    - Class: rviz/Odometry
+      Enabled: true
+      Name: drone2
+      Position Tolerance: 0.1
+      Topic: /drone_2/odom
+      Value: true
+    - Class: rviz/Odometry
+      Enabled: true
+      Name: drone3
+      Position Tolerance: 0.1
+      Topic: /drone_3/odom
+      Value: true
+    - Class: rviz/Odometry
+      Enabled: true
+      Name: drone4
+      Position Tolerance: 0.1
+      Topic: /drone_4/odom
+      Value: true
+    - Class: rviz/Odometry
+      Enabled: true
+      Name: drone5
+      Position Tolerance: 0.1
+      Topic: /drone_5/odom
+      Value: true
+    - Class: rviz/Path
+      Enabled: true
+      Name: path0
+      Topic: /drone_0/path
+      Value: true
+    - Class: rviz/Path
+      Enabled: true
+      Name: path1
+      Topic: /drone_1/path
+      Value: true
+    - Class: rviz/Path
+      Enabled: true
+      Name: path2
+      Topic: /drone_2/path
+      Value: true
+    - Class: rviz/Path
+      Enabled: true
+      Name: path3
+      Topic: /drone_3/path
+      Value: true
+    - Class: rviz/Path
+      Enabled: true
+      Name: path4
+      Topic: /drone_4/path
+      Value: true
+    - Class: rviz/Path
+      Enabled: true
+      Name: path5
+      Topic: /drone_5/path
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 28; 32; 36
+    Fixed Frame: world
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz/Interact
+      Hide Inactive Objects: true
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/FocusCamera
+    - Class: rviz/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 78
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 2
+        Y: -8
+        Z: 3
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 1.20
+      Target Frame: world
+      Value: Orbit (rviz)
+      Yaw: 0.70
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Views:
+    collapsed: false
+  Width: 1400
+  X: 60
+  Y: 40

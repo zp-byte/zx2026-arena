@@ -1,0 +1,25 @@
+<launch>
+  <!-- 智信2026科目三 新仿真平台 —— Gazebo 11 物理后端（无头 gzserver，端口 11411）
+       用法: roslaunch arena_world_gazebo gazebo.launch viewer:=true
+       之后: rosservice call /zx2026/start 开始比赛
+       世界: 由 world_builder.py 生成（同 seed，密林/投放点/起降点与 python 后端一致）
+       物理: gzserver(ODE) 负责无人机速度跟踪 + 树/灌木/互撞真实碰撞；
+             任务/感知/导航/计分节点栈与 python 后端完全一致。
+  -->
+  <arg name="viewer" default="false"/>
+  <param name="/use_sim_time" value="true"/>
+
+  <!-- Gazebo 无头物理（gzserver 经 gazebo_ros 发布 /clock） -->
+  <node name="gazebo" pkg="gazebo_ros" type="gzserver" respawn="false"
+        output="screen" args="$(find arena_world_gazebo)/worlds/forest_world.world"/>
+
+  <!-- 静态场景标记（森林/区域/投放点 → RViz），python 后端由 world_node 发布 -->
+  <node name="scene_marker_node" pkg="arena_world" type="scene_marker_node.py" output="screen"/>
+
+  <!-- 任务/感知/导航/计分 节点栈 -->
+  <include file="$(find arena_world)/launch/stack_nodes.launch"/>
+
+  <!-- 可选：RViz 查看（同 python 后端视图，TF 由插件广播） -->
+  <node if="$(arg viewer)" name="rviz" pkg="rviz" type="rviz"
+        args="-d $(find arena_world)/config/zx2026.rviz" output="screen"/>
+</launch>

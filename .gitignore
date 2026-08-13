@@ -1,0 +1,38 @@
+# --- Catkin / ROS build artifacts ---
+build/
+devel/
+install/
+logs/
+.catkin_tools/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# --- Runtime / data artifacts ---
+*.log
+*.bag
+*.pcd
+/tmp/
+
+# --- Session debugging scripts (not part of the simulator) ---
+/diag_*.sh
+/check_schema.sh
+/collect_results.sh
+/count_models.py
+/inspect_logs.sh
+/regen_world.sh
+/smoke_test.sh
+/survey_gazebo_logs.sh
+/verify_scene*.sh
+
+# --- Gazebo debugging scripts under tools/ (keep viz_run / gazebo_e2e / gazebo_live) ---
+/tools/gazebo_diag.sh
+/tools/gazebo_shot*.sh
+/tools/gazebo_test.sh
+/tools/gz_*.sh
+/tools/gzclient_*.sh
+/tools/check_green.py
+/tools/check_path.sh

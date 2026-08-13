@@ -1,0 +1,12 @@
+<launch>
+  <!-- 智信2026科目三 新仿真平台 —— 一键启动 + RViz 可视化
+       用法: roslaunch arena_world viz.launch
+       之后: rosservice call /zx2026/start 开始比赛
+       另起终端观测：rostopic echo /zx2026/score_summary
+  -->
+  <include file="$(find arena_world)/launch/zx2026_all.launch"/>
+
+  <!-- RViz 视图：分区/密林/投放点 + 6 机位姿与飞行轨迹 -->
+  <node pkg="rviz" type="rviz" name="rviz"
+        args="-d $(find arena_world)/config/zx2026.rviz" output="screen"/>
+</launch>

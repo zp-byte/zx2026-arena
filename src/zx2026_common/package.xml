@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>zx2026_common</name>
+  <version>0.1.0</version>
+  <description>智信2026科目三新仿真平台：共享消息类型与公共工具</description>
+  <maintainer email="team@example.com">team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>message_generation</build_depend>
+  <depend>message_runtime</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+</package>
