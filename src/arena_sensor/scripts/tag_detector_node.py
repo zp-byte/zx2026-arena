@@ -8,6 +8,7 @@
        "距投放点<5m 即命中"）。
 """
 import math
+import random
 
 import rospy
 from std_msgs.msg import Int32, UInt8, Float32
@@ -28,6 +29,7 @@ class TagDetectorNode:
 
         self.scene = Scene()
         self.params = load_tag_params()
+        self.rng = random.Random(self.params["rng_seed"] + self.drone_id * 7919)
         self.odom_pos = (0.0, 0.0, 1.0)
         self.odom_yaw = 0.0
 
@@ -56,7 +58,7 @@ class TagDetectorNode:
             rate.sleep()
 
     def _publish_detection(self):
-        dp, conf = detect_tag(self.scene, self.odom_pos, self.odom_yaw, self.params)
+        dp, conf = detect_tag(self.scene, self.odom_pos, self.odom_yaw, self.params, rng=self.rng)
         if dp is None:
             self.pub_tag.publish(Int32(data=-1))
             self.pub_type.publish(UInt8(data=255))

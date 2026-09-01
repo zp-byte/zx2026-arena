@@ -36,3 +36,11 @@ __pycache__/
 /tools/gzclient_*.sh
 /tools/check_green.py
 /tools/check_path.sh
+
+# --- Run archives (A/B matrix evidence, too bulky for git) ---
+run_logs/
+
+# --- One-off session debuggers ---
+/chk_cfg.sh
+/chk_topics.sh
+/wait_r1.sh

@@ -45,12 +45,42 @@ def build_scene_messages(scene):
         mk.points = pts
         ma.markers.append(mk)
 
-    # 森林（柱子示意）
+    # 森林（树：圆柱树干 + 球冠；其余障碍：立方体）
     fs = float(vis.get("forest_marker_scale", [0.3, 0.3, 2.5])[2])
     ob_count = 0
     for ob in scene.obstacles:
         if ob_count > 400:
             break
+        if ob.kind == "tree":
+            # 树干（棕色圆柱）
+            mk = Marker()
+            mk.header.frame_id = "world"
+            mk.ns = "forest"
+            mk.id = mid
+            mid += 1
+            mk.type = Marker.CYLINDER
+            mk.action = Marker.ADD
+            mk.pose.position = Point(ob.cx, ob.cy, ground_z + ob.trunk_h / 2.0)
+            mk.pose.orientation.w = 1.0
+            mk.scale.x = mk.scale.y = 2.0 * ob.trunk_r
+            mk.scale.z = ob.trunk_h
+            mk.color.r, mk.color.g, mk.color.b, mk.color.a = (0.45, 0.32, 0.18, 0.95)
+            ma.markers.append(mk)
+            # 球冠（绿色球）
+            mk = Marker()
+            mk.header.frame_id = "world"
+            mk.ns = "forest"
+            mk.id = mid
+            mid += 1
+            mk.type = Marker.SPHERE
+            mk.action = Marker.ADD
+            mk.pose.position = Point(ob.cx, ob.cy, ob.crown_z)
+            mk.pose.orientation.w = 1.0
+            mk.scale.x = mk.scale.y = mk.scale.z = 2.0 * ob.crown_r
+            mk.color.r, mk.color.g, mk.color.b, mk.color.a = (0.14, 0.48, 0.22, 0.9)
+            ma.markers.append(mk)
+            ob_count += 1
+            continue
         mk = Marker()
         mk.header.frame_id = "world"
         mk.ns = "forest"

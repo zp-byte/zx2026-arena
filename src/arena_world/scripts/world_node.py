@@ -12,6 +12,7 @@
   * 服务 /zx2026/world/reset（重置到初始位姿）。
 """
 import math
+import random
 
 import rospy
 import numpy as np
@@ -20,7 +21,8 @@ from std_msgs.msg import String
 from std_srvs.srv import Empty, EmptyResponse
 from rosgraph_msgs.msg import Clock
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist, PoseArray, Pose, Point, Quaternion, Vector3, TransformStamped
+from geometry_msgs.msg import (Twist, PoseArray, Pose, Point, Quaternion, Vector3,
+                               Vector3Stamped, TransformStamped)
 from tf.msg import tfMessage
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -41,17 +43,73 @@ class DroneSim:
         self.cmd_yaw_rate = 0.0
         self.collided = False
         self._collide_logged = False
+        # 碰撞恢复配置
+        cc = settings.get("collision", {}).get("recovery", {})
+        self._collision_enabled = bool(cc.get("enabled", True))
+        self._bounce_dt = float(cc.get("bounce_dt", 1.0))
+        self._cooldown_dt = float(cc.get("cooldown_dt", 2.0))
+        self._bounce_vel = float(cc.get("bounce_vel", 2.0))
+        self._max_collisions = int(cc.get("max_collisions", 3))
+        self._collision_t = -1.0
+        self._collision_count = 0
+        self._bounce_dir = np.zeros(3)
 
     def set_vel_cmd(self, vx, vy, vz, yaw_rate):
         self.cmd_vel = np.array([vx, vy, vz])
         self.cmd_yaw_rate = yaw_rate
 
-    def step(self, dt):
+    def step(self, dt, wind=None):
         self.backend.set_vel_cmd(self.cmd_vel, self.cmd_yaw_rate)
-        self.backend.step(dt)
+        self.backend.step(dt, wind=wind)
 
     def state(self):
         return self.backend.get_state()
+
+
+class WindModel:
+    """风场模型：定常风 mean + 共享慢变阵风（零均值 OU）+ 每机独立湍流（零均值 OU）。
+
+    OU 离散式：x += (mu-x)*dt/tau + sigma*sqrt(2*dt/tau)*N(0,1)，sigma 即稳态标准差。
+    确定性：rng 由 run_seed 派生，每步抽取顺序固定（gx, gy, 各机 tx, ty）。
+    仅水平分量（z 恒 0）：垂直由任务高度控制，不扰动。
+    应用门控（world_node）：仅 P4_EXECUTE 飞行期（P3 起飞窗口不施风，见 _on_state 注释）；
+    冷却冻结期跳过。
+    """
+
+    def __init__(self, params, seed, drone_count):
+        mn = params.get("mean", [0.0, 0.0])
+        self.mean = [float(mn[0]), float(mn[1])]
+        self.gust_std = float(params.get("gust_std", 0.4))
+        self.gust_tau = float(params.get("gust_timescale_s", 4.0))
+        self.turb_std = float(params.get("turb_std", 0.25))
+        self.turb_tau = float(params.get("turb_timescale_s", 1.0))
+        self.rng = random.Random(seed + 0xA11CE)
+        self.gx = 0.0
+        self.gy = 0.0
+        self.tx = [0.0] * drone_count
+        self.ty = [0.0] * drone_count
+
+    def _ou(self, x, mu, std, tau, dt):
+        return (x + (mu - x) * dt / tau
+                + std * math.sqrt(2.0 * dt / tau) * self.rng.gauss(0.0, 1.0))
+
+    def step(self, dt):
+        self.gx = self._ou(self.gx, 0.0, self.gust_std, self.gust_tau, dt)
+        self.gy = self._ou(self.gy, 0.0, self.gust_std, self.gust_tau, dt)
+        for i in range(len(self.tx)):
+            self.tx[i] = self._ou(self.tx[i], 0.0, self.turb_std, self.turb_tau, dt)
+            self.ty[i] = self._ou(self.ty[i], 0.0, self.turb_std, self.turb_tau, dt)
+
+    def wind_for(self, i):
+        return np.array([self.mean[0] + self.gx + self.tx[i],
+                         self.mean[1] + self.gy + self.ty[i],
+                         0.0])
+
+    def reset(self):
+        self.gx = 0.0
+        self.gy = 0.0
+        self.tx = [0.0] * len(self.tx)
+        self.ty = [0.0] * len(self.ty)
 
 
 class WorldNode:
@@ -66,6 +124,16 @@ class WorldNode:
         self.control_dt = float(self.sim_settings.get("control_dt", 0.05))
         self.publish_dt = float(self.sim_settings.get("publish_dt", 0.05))
         self.backend_name = self.sim_settings.get("backend", "cascade_pid")
+
+        # 风场模型（enabled:false → None → 所有路径 wind=None，零侵入）
+        wd = self.sim_settings.get("wind", {})
+        self.wind_model = None
+        if bool(wd.get("enabled", False)):
+            self.wind_model = WindModel(wd, int(self.sim_settings.get("run_seed", 42)),
+                                        self.scene.drone_count)
+        self.mission_active = False
+        self._last_state = None
+        rospy.Subscriber("/zx2026/state", String, self._on_state)
 
         # 起降区 pads → 6 机初始位姿
         pads = self.scene.get_pads()
@@ -92,6 +160,10 @@ class WorldNode:
                 ns + "/vel_cmd", Twist, lambda msg, i=i: self._on_vel_cmd(i, msg))
         # TF：world → drone_<i>，供 RViz 显示无人机位姿/轨迹
         self.tf_pub = rospy.Publisher("/tf", tfMessage, queue_size=10)
+        # 风观测（仅启用时发布，供 flock_obs 采样阵风幅值）
+        self.pub_wind = None
+        if self.wind_model is not None:
+            self.pub_wind = rospy.Publisher("/zx2026/wind", Vector3Stamped, queue_size=10)
 
         # ---- 服务 ----
         self.srv_reset = rospy.Service("/zx2026/world/reset", Empty, self._on_reset)
@@ -106,6 +178,19 @@ class WorldNode:
         self._publish_scene_static()
 
     # ---------------------------------------------------------------- callbacks
+    def _on_state(self, msg):
+        st = msg.data
+        if st != self._last_state:
+            self._last_state = st
+            if st == "P3_TAKEOFF" and self.wind_model is not None:
+                # 任务开始：阵风从 0 起，保证确定性可复现
+                self.wind_model.reset()
+        # 风只在 P4_EXECUTE（穿越/投放/返航，含返航）生效；P1/P2 停靠、P5 后不施风。
+        # P3 起飞窗口不施风：pads 仅 1.5m 间隔 + 错峰起飞是全系统最脆弱的碰撞窗口，
+        # 实测风漂移（悬停 0.455·w）会在此引发碰撞级联拖垮任务（R1 验证结论）。
+        # 起飞是贴地受控阶段，风主要影响 P4 开放空域（A* 偏差/投放精度/群集对齐）。
+        self.mission_active = st == "P4_EXECUTE"
+
     def _on_vel_cmd(self, i, msg):
         d = self.drones[i]
         d.set_vel_cmd(msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z)
@@ -114,7 +199,14 @@ class WorldNode:
         for i, d in self.drones.items():
             d.backend.reset((d.home[0], d.home[1], d.home[2], 0.0))
             d.collided = False
+            d._collide_logged = False
             d.cmd_vel = np.zeros(3)
+            d._collision_t = -1.0
+            d._collision_count = 0
+            d._bounce_dir = np.zeros(3)
+            self.pub_collision[i].publish(Bool(data=False))
+        if self.wind_model is not None:
+            self.wind_model.reset()
         self.sim_t = 0.0
         return EmptyResponse()
 
@@ -128,9 +220,13 @@ class WorldNode:
     def step_once(self):
         dt = self.world_dt
         self.sim_t += dt
+        if self.wind_model is not None:
+            self.wind_model.step(dt)
 
         # 碰撞检测（对上一状态）：障碍 + 地面
         for i, d in self.drones.items():
+            if d.collided:
+                continue
             p = d.state().pos_tuple()
             if self.scene.collides(p):
                 d.collided = True
@@ -139,6 +235,16 @@ class WorldNode:
                     d._collide_logged = True
                     rospy.logwarn("drone %d COLLIDED obstacle at (%.2f,%.2f,%.2f)",
                                   i, p[0], p[1], p[2])
+                # 碰撞恢复：记录时间、计算弹开方向
+                if d._collision_t < 0:
+                    d._collision_t = self.sim_t
+                    d._collision_count += 1
+                    speed = float(np.linalg.norm(d.cmd_vel))
+                    if speed > 0.01:
+                        rev = (-d.cmd_vel[0], -d.cmd_vel[1], -d.cmd_vel[2])
+                        d._bounce_dir = np.array(geo.normalize(rev)) * d._bounce_vel
+                    else:
+                        d._bounce_dir = np.array([0.0, 0.0, d._bounce_vel])
 
         # 六机互撞
         states = {i: d.state() for i, d in self.drones.items()}
@@ -160,13 +266,46 @@ class WorldNode:
                             q = self.drones[k].state().pos_tuple()
                             rospy.logwarn("drone %d COLLIDED inter-drone with %d at (%.2f,%.2f,%.2f)",
                                           k, (j if k == i else i), q[0], q[1], q[2])
+                        # 碰撞恢复：首次碰撞记录弹开方向（远离对方）
+                        dk = self.drones[k]
+                        if dk._collision_t < 0:
+                            other = i if k == j else j
+                            away = (q[0] - states[other].pos[0],
+                                    q[1] - states[other].pos[1], 0.0)
+                            dk._collision_t = self.sim_t
+                            dk._collision_count += 1
+                            dk._bounce_dir = np.array(geo.normalize(away)) * dk._bounce_vel
 
-        # 步进
+        # 步进（碰撞恢复：弹开 → 冷却 → 恢复，替代永久冻结）
         for d in self.drones.values():
             if d.collided:
-                # 碰撞后冻结，避免穿透
-                d.cmd_vel = np.zeros(3)
-            d.step(dt)
+                if not d._collision_enabled:
+                    d.cmd_vel = np.zeros(3)  # 原行为：永久冻结
+                else:
+                    elapsed = self.sim_t - d._collision_t
+                    if d._collision_count > d._max_collisions:
+                        d.cmd_vel = np.zeros(3)  # 超限永久冻结
+                    elif elapsed < d._bounce_dt:
+                        d.cmd_vel = d._bounce_dir  # 弹开
+                    elif elapsed < d._bounce_dt + d._cooldown_dt:
+                        d.cmd_vel = np.zeros(3)  # 冷却冻结
+                    else:
+                        # 恢复：清除碰撞状态，让 nav 重新接管
+                        d.collided = False
+                        d._collide_logged = False
+                        d._collision_t = -1.0
+                        self.pub_collision[d.drone_id].publish(Bool(data=False))
+                        rospy.loginfo("drone %d recovered from collision (count=%d)",
+                                      d.drone_id, d._collision_count)
+            wind_vec = None
+            if self.wind_model is not None and self.mission_active:
+                # 冷却冻结期跳过风：避免碰撞点漂移导致碰撞计数升级为永久冻结
+                in_cooldown = (d.collided and d._collision_enabled
+                               and d._bounce_dt <= self.sim_t - d._collision_t
+                               < d._bounce_dt + d._cooldown_dt)
+                if not in_cooldown:
+                    wind_vec = self.wind_model.wind_for(d.drone_id)
+            d.step(dt, wind=wind_vec)
 
         # 时钟发布（每 control tick 同步一次 /clock）
         self._acc_pub += dt
@@ -181,6 +320,17 @@ class WorldNode:
             c.clock.secs = int(self.sim_t)
             c.clock.nsecs = int((self.sim_t - int(self.sim_t)) * 1e9)
             self.pub_clock.publish(c)
+        # 风观测：共享分量（定常风 + 阵风，不含每机湍流），供 flock_obs 采样 +
+        # nav 风前馈。仅 mission_active（P4 飞行期）发真实值，其余发 0——OU 在非
+        # 飞行期仍演化，若发布非零而无人机未受力，nav 前馈会朝"幻影风"漂。
+        if self.pub_wind is not None:
+            w = Vector3Stamped()
+            w.header.stamp = rospy.Time.now()
+            w.header.frame_id = "world"
+            if self.mission_active:
+                w.vector.x = self.wind_model.mean[0] + self.wind_model.gx
+                w.vector.y = self.wind_model.mean[1] + self.wind_model.gy
+            self.pub_wind.publish(w)
         for i, d in self.drones.items():
             od = Odometry()
             od.header.stamp = rospy.Time.now()

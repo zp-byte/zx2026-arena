@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """无人机动力学后端：kinematic / cascade_pid。
 
-所有后端实现同一接口：reset(pose) / set_vel_cmd(vel, yaw_rate) / step(dt) /
+所有后端实现同一接口：reset(pose) / set_vel_cmd(vel, yaw_rate) / step(dt, wind=None) /
 get_state()。world_node 用 sim_settings.yaml 的 backend 字段选择。
+
+step 的可选 wind 参数为外部风扰动（水平向量, m/s）：
+  * cascade_pid：acc += (wind - vel)/tau_aero（气动阻力拖向风速），控制器反推；
+  * kinematic：   速度指令直接叠加风（全卷入近似，低保真）。
+wind=None 时行为与无风完全一致。
 """
 import math
 
@@ -49,9 +54,12 @@ class KinematicBackend:
         self._cmd = np.array(vel[:3], dtype=float)
         self._yaw_rate = float(yaw_rate)
 
-    def step(self, dt):
+    def step(self, dt, wind=None):
         s = self.state
         s.vel = self._cmd
+        if wind is not None:
+            # 低保真近似：全卷入（kinematic 仅用于快速调参/CI，风仅按 cascade_pid 校调）
+            s.vel = s.vel + np.array(wind[:3], dtype=float)
         s.pos = s.pos + s.vel * dt
         s.yaw = math.fmod(s.yaw + self._yaw_rate * dt, 2.0 * math.pi)
         s.att[2] = s.yaw
@@ -76,6 +84,7 @@ class CascadePidBackend:
         self._max_tilt = math.radians(float(p.get("max_tilt_deg", 30.0)))
         self._max_vel = float(p.get("max_vel", 2.5))
         self._acc_cap = float(p.get("acc_cap", 6.0))
+        self._tau_aero = float(p.get("tau_aero", 0.6))
         self.state = DroneState()
         self._cmd = np.zeros(3)
 
@@ -96,12 +105,16 @@ class CascadePidBackend:
         self._cmd = v
         self._yaw_rate = float(yaw_rate)
 
-    def step(self, dt):
+    def step(self, dt, wind=None):
         s = self.state
         # 速度误差 → 净加速度指令（推力减重力，悬停时 = 0）
         err = self._cmd - s.vel
         acc = self._vel_kp * err - self._vel_kd * self._last_vel_err
         self._last_vel_err = err
+        # 风扰动：气动阻力拖向风速（acc += (wind-vel)/tau_aero）。加在限幅之前，
+        # 使总加速度受 cap 约束；下一拍 err 变非零 → 控制器可见地"抗风"。
+        if wind is not None:
+            acc = acc + (np.array(wind[:3], dtype=float) - s.vel) / self._tau_aero
         # 加速度限幅
         an = np.linalg.norm(acc)
         if an > self._acc_cap:

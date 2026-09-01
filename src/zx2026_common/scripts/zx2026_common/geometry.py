@@ -70,6 +70,36 @@ def ray_sphere(origin, direction, center, radius):
     return t2 if t2 >= 0 else None
 
 
+def ray_cylinder(origin, direction, center, radius, z0, z1):
+    """射线与竖直圆柱（center=(cx,cy)，半径 radius，z∈[z0,z1]）求交。
+
+    只求侧面（lidar 俯仰角有限，不射穿上下底）。返回最近 t（>=0）或 None。
+    """
+    ox, oy, oz = origin
+    dx, dy, dz = direction
+    a = dx * dx + dy * dy
+    if a < 1e-12:
+        # 近似竖直射线，忽略柱面
+        return None
+    fx = ox - center[0]
+    fy = oy - center[1]
+    b = 2.0 * (fx * dx + fy * dy)
+    c = fx * fx + fy * fy - radius * radius
+    disc = b * b - 4.0 * a * c
+    if disc < 0:
+        return None
+    sq = math.sqrt(disc)
+    best = None
+    for t in ((-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)):
+        if t < 0:
+            continue
+        z = oz + t * dz
+        if z0 <= z <= z1:
+            if best is None or t < best:
+                best = t
+    return best
+
+
 def ray_aabb(origin, direction, lo, hi):
     """射线与轴对齐盒求交（lo/hi: 最小/最大角点），返回最近 t 或 None。"""
     tmin = 0.0

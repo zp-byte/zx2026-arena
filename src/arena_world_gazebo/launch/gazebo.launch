@@ -16,6 +16,11 @@
   <!-- 静态场景标记（森林/区域/投放点 → RViz），python 后端由 world_node 发布 -->
   <node name="scene_marker_node" pkg="arena_world" type="scene_marker_node.py" output="screen"/>
 
+  <!-- Gazebo 碰撞检测 + 恢复（补齐 python 后端 world_node 的事件源：否则撞树后
+       nav 收不到 collision=True → 不注入占用 → 卡死在树边） -->
+  <node name="gazebo_collision_monitor" pkg="arena_world_gazebo"
+        type="gazebo_collision_monitor.py" output="screen"/>
+
   <!-- 任务/感知/导航/计分 节点栈 -->
   <include file="$(find arena_world)/launch/stack_nodes.launch"/>
 

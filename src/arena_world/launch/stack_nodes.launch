@@ -7,6 +7,9 @@
   <!-- 编队就绪 -->
   <node pkg="arena_fleet" type="fleet_node.py" name="fleet_node" output="screen"/>
 
+  <!-- 通信模型（邻居信息无线链路；comms.enabled=false 时空闲零发布，nav 直连） -->
+  <node pkg="arena_fleet" type="comm_model_node.py" name="comm_model" output="screen"/>
+
   <!-- 感知：每机 1 份 tag 检测 + lidar -->
   <node pkg="arena_sensor" type="tag_detector_node.py" name="tag_detector_0" output="log">
     <param name="drone_id" value="0"/>
@@ -24,6 +27,26 @@
     <param name="drone_id" value="4"/>
   </node>
   <node pkg="arena_sensor" type="tag_detector_node.py" name="tag_detector_5" output="log">
+    <param name="drone_id" value="5"/>
+  </node>
+
+  <!-- lidar：每机 1 份模拟点云（闭环导航消费 /drone_<id>/cloud） -->
+  <node pkg="arena_sensor" type="lidar_node.py" name="lidar_0" output="log">
+    <param name="drone_id" value="0"/>
+  </node>
+  <node pkg="arena_sensor" type="lidar_node.py" name="lidar_1" output="log">
+    <param name="drone_id" value="1"/>
+  </node>
+  <node pkg="arena_sensor" type="lidar_node.py" name="lidar_2" output="log">
+    <param name="drone_id" value="2"/>
+  </node>
+  <node pkg="arena_sensor" type="lidar_node.py" name="lidar_3" output="log">
+    <param name="drone_id" value="3"/>
+  </node>
+  <node pkg="arena_sensor" type="lidar_node.py" name="lidar_4" output="log">
+    <param name="drone_id" value="4"/>
+  </node>
+  <node pkg="arena_sensor" type="lidar_node.py" name="lidar_5" output="log">
     <param name="drone_id" value="5"/>
   </node>
 
@@ -70,6 +93,9 @@
   <node pkg="arena_mission" type="type_match_node.py" name="type_match_node" output="screen"/>
   <node pkg="arena_mission" type="drop_simulator_node.py" name="drop_simulator_node" output="screen"/>
   <node pkg="arena_mission" type="stage_controller_node.py" name="stage_controller" output="screen"/>
+
+  <!-- P0 导航指标收集器（全局单实例，纯观测，落盘 run_logs/） -->
+  <node pkg="arena_nav" type="nav_metrics_node.py" name="nav_metrics" output="screen"/>
 
   <!-- 计分 -->
   <node pkg="arena_score" type="scorekeeper_node.py" name="scorekeeper" output="screen"/>

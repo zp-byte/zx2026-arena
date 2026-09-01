@@ -15,15 +15,28 @@ from zx2026_common import geometry as geo
 # 障碍物
 # ---------------------------------------------------------------------------
 class Obstacle:
-    """轴对齐盒障碍（立木/灌木/路缘/围栏/标识柱的包围盒）。"""
+    """轴对齐盒障碍（立木/灌木/路缘/围栏/标识柱的包围盒）。
 
-    __slots__ = ("lo", "hi", "kind", "id")
+    kind=="tree" 额外携带「圆柱树干 + 球冠」几何（lo/hi 保留作 AABB 兜底，
+    供其余 kind 使用）。树干为硬碰撞体并参与 lidar / A* 占用；球冠仅视觉
+    （rviz / gazebo），不参与碰撞、lidar 或占用。
+    """
+
+    __slots__ = ("lo", "hi", "kind", "id",
+                 "cx", "cy", "trunk_r", "trunk_h", "crown_r", "crown_z")
 
     def __init__(self, lo, hi, kind="tree", oid=0):
         self.lo = lo
         self.hi = hi
         self.kind = kind
         self.id = oid
+        # tree 专用几何字段（其余 kind 保持 None）
+        self.cx = None
+        self.cy = None
+        self.trunk_r = None
+        self.trunk_h = None
+        self.crown_r = None
+        self.crown_z = None
 
 
 class Zone:
@@ -186,9 +199,18 @@ class Scene:
                         continue
                     r = self.rng.uniform(*trunk_r)
                     h = height
-                    lo = (bx - r, by - r, self.venue["ground_z"])
-                    hi = (bx + r, by + r, self.venue["ground_z"] + h)
-                    self.obstacles.append(Obstacle(lo, hi, "tree", oid))
+                    crown_r = float(ts.get("crown_r", 1.2))
+                    gz = self.venue["ground_z"]
+                    lo = (bx - r, by - r, gz)
+                    hi = (bx + r, by + r, gz + h)
+                    ob = Obstacle(lo, hi, "tree", oid)
+                    ob.cx = bx
+                    ob.cy = by
+                    ob.trunk_r = r
+                    ob.trunk_h = h
+                    ob.crown_r = crown_r
+                    ob.crown_z = gz + h  # 球冠球心在树干顶，冠体延伸到 ~h+crown_r
+                    self.obstacles.append(ob)
                     oid += 1
             return
 
@@ -208,9 +230,18 @@ class Scene:
                 continue
             r = self.rng.uniform(*f["trunk_r"])
             h = self.rng.uniform(*f["tree_h"])
-            lo = (x - r, y - r, self.venue["ground_z"])
-            hi = (x + r, y + r, self.venue["ground_z"] + h)
-            self.obstacles.append(Obstacle(lo, hi, "tree", oid))
+            crown_r = float(f.get("crown_r", 1.2))
+            gz = self.venue["ground_z"]
+            lo = (x - r, y - r, gz)
+            hi = (x + r, y + r, gz + h)
+            ob = Obstacle(lo, hi, "tree", oid)
+            ob.cx = x
+            ob.cy = y
+            ob.trunk_r = r
+            ob.trunk_h = h
+            ob.crown_r = crown_r
+            ob.crown_z = gz + h
+            self.obstacles.append(ob)
             oid += 1
         for _ in range(int(f.get("n_bushes", 120))):
             x = self.rng.uniform(xmin, xmax)
@@ -269,6 +300,11 @@ class Scene:
         if pos[2] - radius < gz:
             return True
         for ob in self.obstacles:
+            if ob.kind == "tree":
+                # 树干：球 vs 竖直圆柱；球冠不参与硬碰撞
+                if self._collides_trunk(pos, radius, ob):
+                    return True
+                continue
             lo, hi = ob.lo, ob.hi
             cx = geo.clamp(pos[0], lo[0], hi[0])
             cy = geo.clamp(pos[1], lo[1], hi[1])
@@ -277,11 +313,26 @@ class Scene:
                 return True
         return False
 
+    def _collides_trunk(self, pos, radius, ob):
+        """球(pos, radius) 是否与树的竖直树干相交。"""
+        if geo.dist_xy(pos, (ob.cx, ob.cy)) > ob.trunk_r + radius:
+            return False
+        gz = self.venue["ground_z"]
+        return pos[2] + radius >= gz and pos[2] - radius <= gz + ob.trunk_h
+
     def collides_xy(self, x, y, z_lo, z_hi, pad=0.0):
         """2D 单元(x,y) 在 z 带 [z_lo,z_hi] 内是否有障碍（A* 占用用）。"""
         for ob in self.obstacles:
             # 围栏/标识柱低于巡航高度，A* 不应被其阻挡
             if ob.kind in ("fence", "marker"):
+                continue
+            if ob.kind == "tree":
+                gz = self.venue["ground_z"]
+                dxy = geo.dist_xy((x, y), (ob.cx, ob.cy))
+                # 树干圆盘（球冠仅视觉，不参与占用）
+                if not (gz + ob.trunk_h < z_lo or gz > z_hi):
+                    if dxy <= ob.trunk_r + pad:
+                        return True
                 continue
             if ob.hi[2] < z_lo or ob.lo[2] > z_hi:
                 continue
@@ -299,6 +350,15 @@ class Scene:
             if 0 <= t <= max_t:
                 best = t
         for ob in self.obstacles:
+            if ob.kind == "tree":
+                # 树干圆柱（球冠仅视觉，lidar 不反射枝叶）
+                gz = self.venue["ground_z"]
+                t = geo.ray_cylinder(origin, direction, (ob.cx, ob.cy),
+                                     ob.trunk_r, gz, gz + ob.trunk_h)
+                if t is not None and 0 <= t <= max_t:
+                    if best is None or t < best:
+                        best = t
+                continue
             t = geo.ray_aabb(origin, direction, ob.lo, ob.hi)
             if t is not None and 0 <= t <= max_t:
                 if best is None or t < best:

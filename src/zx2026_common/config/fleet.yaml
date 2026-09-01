@@ -9,19 +9,19 @@ drone_radius: 0.35         # 碰撞球半径(m)
 drones:
   - drone_id: 0
     payload: TYPE_A
-    sensor_range: 5.0
+    sensor_range: 12.0
   - drone_id: 1
     payload: TYPE_B
-    sensor_range: 5.0
+    sensor_range: 12.0
   - drone_id: 2
     payload: TYPE_C
-    sensor_range: 5.0
+    sensor_range: 12.0
   - drone_id: 3
     payload: TYPE_D
-    sensor_range: 5.0
+    sensor_range: 12.0
   - drone_id: 4
     payload: TYPE_E
-    sensor_range: 5.0
+    sensor_range: 12.0
   - drone_id: 5
     payload: TYPE_A
-    sensor_range: 5.0
+    sensor_range: 12.0

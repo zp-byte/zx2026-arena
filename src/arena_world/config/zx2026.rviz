@@ -32,6 +32,15 @@ Visualization Manager:
       Plane Cell Count: 40
       Reference Frame: world
       Value: true
+    - Class: rviz/Map
+      Enabled: true
+      Name: SLAM map (drone0)
+      Alpha: 0.7
+      Color Scheme: map
+      Draw Behind: false
+      Topic: /drone_0/occ_grid
+      Use Timestamp: false
+      Value: true
     - Class: rviz/MarkerArray
       Enabled: false
       Name: Scene (zones/forest/drops)
@@ -66,6 +75,90 @@ Visualization Manager:
         drone_5:
           world: {}
       Update Interval: 0.2
+      Value: true
+    - Class: rviz/PointCloud2
+      Enabled: true
+      Name: cloud0
+      Color: 255; 85; 85
+      Color Transformer: FlatColor
+      Position Transformer: XYZ
+      Queue Size: 10
+      Size (m): 0.08
+      Size (Pixels): 3
+      Style: Points
+      Topic: /drone_0/cloud
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+    - Class: rviz/PointCloud2
+      Enabled: true
+      Name: cloud1
+      Color: 85; 255; 85
+      Color Transformer: FlatColor
+      Position Transformer: XYZ
+      Queue Size: 10
+      Size (m): 0.08
+      Size (Pixels): 3
+      Style: Points
+      Topic: /drone_1/cloud
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+    - Class: rviz/PointCloud2
+      Enabled: true
+      Name: cloud2
+      Color: 85; 150; 255
+      Color Transformer: FlatColor
+      Position Transformer: XYZ
+      Queue Size: 10
+      Size (m): 0.08
+      Size (Pixels): 3
+      Style: Points
+      Topic: /drone_2/cloud
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+    - Class: rviz/PointCloud2
+      Enabled: true
+      Name: cloud3
+      Color: 255; 255; 85
+      Color Transformer: FlatColor
+      Position Transformer: XYZ
+      Queue Size: 10
+      Size (m): 0.08
+      Size (Pixels): 3
+      Style: Points
+      Topic: /drone_3/cloud
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+    - Class: rviz/PointCloud2
+      Enabled: true
+      Name: cloud4
+      Color: 85; 255; 255
+      Color Transformer: FlatColor
+      Position Transformer: XYZ
+      Queue Size: 10
+      Size (m): 0.08
+      Size (Pixels): 3
+      Style: Points
+      Topic: /drone_4/cloud
+      Use Fixed Frame: true
+      Use rainbow: false
+      Value: true
+    - Class: rviz/PointCloud2
+      Enabled: true
+      Name: cloud5
+      Color: 255; 85; 255
+      Color Transformer: FlatColor
+      Position Transformer: XYZ
+      Queue Size: 10
+      Size (m): 0.08
+      Size (Pixels): 3
+      Style: Points
+      Topic: /drone_5/cloud
+      Use Fixed Frame: true
+      Use rainbow: false
       Value: true
     - Class: rviz/Odometry
       Enabled: true

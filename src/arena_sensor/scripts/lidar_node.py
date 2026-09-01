@@ -34,8 +34,18 @@ class LidarNode:
 
         # ray 模式：方位角 × 俯仰角
         self.az_steps = 72       # 每圈
-        self.el_vals = [-0.5, -0.25, 0.0, 0.25, 0.5]
-        self.noise = 0.03
+        cl = settings.get("closed_loop", {})
+        if cl.get("lidar_top_blind", False):
+            # Mid-360 式顶盲锥：俯仰约 -40° ~ +20°，正上方留盲区
+            self.el_vals = [-0.70, -0.45, -0.25, -0.10, 0.0, 0.20, 0.35]
+        else:
+            self.el_vals = [-0.5, -0.25, 0.0, 0.25, 0.5]
+        # 传感器噪声模型（物理正确：角度噪声注入到射线方向，距离噪声沿射线方向）
+        sl = settings.get("sensor", {}).get("lidar", {})
+        self.range_noise_std = float(sl.get("range_noise_std", 0.02))
+        self.dropout_rate = float(sl.get("dropout_rate", 0.05))
+        self.angular_noise_rad = math.radians(float(sl.get("angular_noise_deg", 0.5)))
+        self.false_positive_rate = float(sl.get("false_positive_rate", 0.0))
         self.rng = random.Random(self.seed + self.drone_id * 7919)
 
         self.odom_pos = (0.0, 0.0, 1.0)
@@ -64,17 +74,42 @@ class LidarNode:
         for az_i in range(self.az_steps):
             az = self.odom_yaw + az_i * (2.0 * math.pi / self.az_steps)
             for el in self.el_vals:
-                # 单位方向
-                dx = math.cos(el) * math.cos(az)
-                dy = math.cos(el) * math.sin(az)
-                dz = math.sin(el)
+                # 角度噪声：射线方向微偏（物理正确的噪声注入点）
+                if self.angular_noise_rad > 0:
+                    az_noisy = az + self.rng.gauss(0.0, self.angular_noise_rad)
+                    el_noisy = el + self.rng.gauss(0.0, self.angular_noise_rad)
+                else:
+                    az_noisy, el_noisy = az, el
+                dx = math.cos(el_noisy) * math.cos(az_noisy)
+                dy = math.cos(el_noisy) * math.sin(az_noisy)
+                dz = math.sin(el_noisy)
                 d = geo.normalize((dx, dy, dz))
                 t = self.scene.raycast(origin, d, max_t=self.range)
                 if t is None:
                     continue
-                hit = geo.add(origin, geo.scale(d, t))
-                n = self.rng.gauss(0.0, self.noise)
-                pts.append((hit[0] + n, hit[1] + n, hit[2] + n))
+                # 随机丢失
+                if self.dropout_rate > 0 and self.rng.random() < self.dropout_rate:
+                    continue
+                # 距离噪声（与距离成正比，沿射线方向）
+                noisy_t = t + self.rng.gauss(0.0, self.range_noise_std * t)
+                if noisy_t < 0.0:
+                    continue
+                hit = geo.add(origin, geo.scale(d, noisy_t))
+                pts.append(hit)
+        # 随机误检（默认关，真机 lidar 误检率低）
+        if self.false_positive_rate > 0:
+            n_fp = max(1, int(self.rng.random() * self.false_positive_rate *
+                              self.az_steps * len(self.el_vals)))
+            for _ in range(n_fp):
+                fp_az = self.rng.uniform(0, 2.0 * math.pi)
+                fp_el = self.rng.uniform(-0.7, 0.35)
+                fp_r = self.rng.uniform(0.1, self.range)
+                fp_dx = math.cos(fp_el) * math.cos(fp_az)
+                fp_dy = math.cos(fp_el) * math.sin(fp_az)
+                fp_dz = math.sin(fp_el)
+                fp_dir = geo.normalize((fp_dx, fp_dy, fp_dz))
+                fp_hit = geo.add(origin, geo.scale(fp_dir, fp_r))
+                pts.append(fp_hit)
 
         pc = PointCloud2()
         pc.header.stamp = rospy.Time.now()
@@ -82,8 +117,8 @@ class LidarNode:
         pc.height = 1
         pc.width = len(pts)
         pc.is_dense = True
-        pc.point_step = 16
-        pc.row_step = 16 * len(pts)
+        pc.point_step = 12        # x/y/z 三个 FLOAT32，无填充
+        pc.row_step = 12 * len(pts)
         pc.fields = [
             PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),

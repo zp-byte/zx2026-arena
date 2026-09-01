@@ -1,0 +1,10 @@
+# 非凸-α 编队协调层：共享航点 + 每机偏移
+# 参考 modules/README.md「集群避障飞行」：所有机共享同一份航点表，
+# 每机飞到「共享航点 + 相对自身初始位置的偏移」，保持初始相对队形。
+# 命令行覆盖：formation.enabled=true、formation.reference=explicit（标量可覆盖，offsets 列表需改本文件）。
+formation:
+  enabled: false            # true 开启编队展开
+  reference: pad0           # pad0 = 相对 0 号机起降点（非凸-α「保持初始相对位置」）
+                            # explicit = 用下方 offsets 显式指定（对齐真机 formation/drone* 配置）
+  offsets: []               # reference=explicit 时生效，长度 = drone_count，每项 [dx, dy, dz]
+                            # 注意：偏移需保持目标仍在穿越区内，否则可能触发 CROSSING_ZONE_MISSED

@@ -55,17 +55,24 @@ def vis_geo(geom, c):
     return '<visual name="vis"><geometry>%s</geometry>%s</visual>' % (geom, c)
 
 
-def tree_model(oid, lo, hi):
-    """AABB -> 外接圆柱（trunk 碰撞+视觉），顶加蓬松球形树冠（仅视觉）。"""
-    cx = (lo[0] + hi[0]) / 2.0
-    cy = (lo[1] + hi[1]) / 2.0
-    r = (hi[0] - lo[0]) / 2.0
-    h = hi[2] - lo[2]
+def vis_pose(name, geom, color, x, y, z, yaw=0.0):
+    """带位姿的视觉（几何+材质），用于单 link 多视觉模型。"""
+    return ('<visual name="%s"><pose>%.3f %.3f %.3f 0 0 %.3f</pose>'
+            '<geometry>%s</geometry>%s</visual>'
+            % (name, x, y, z, yaw, geom, mat(*color)))
+
+
+def tree_model(oid, ob):
+    """圆柱树干（碰撞+视觉）+ 蓬松球形树冠（仅视觉）；几何取 ob 的 trunk/crown 字段。"""
+    cx = ob.cx
+    cy = ob.cy
+    r = ob.trunk_r
+    h = ob.trunk_h
     cyl = '<cylinder><radius>%.2f</radius><length>%.2f</length></cylinder>' % (r, h)
-    # 树冠：多个绿色球组成,更茂密可见
+    # 树冠：多个绿色球组成,更茂密可见（主冠半径=ob.crown_r，其余小球保留）
     crown_links = []
     crown_offsets = [
-        (0.0, 0.0, h * 0.55, 1.20),
+        (0.0, 0.0, h * 0.55, ob.crown_r),
         (0.55, 0.0, h * 0.75, 0.80),
         (-0.55, 0.15, h * 0.70, 0.80),
         (0.0, 0.55, h * 0.68, 0.78),
@@ -149,7 +156,32 @@ def drop_model(dp):
 
 def drone_model(i, x, y):
     r, g, b = DRONE_COLORS[i % len(DRONE_COLORS)]
-    box = '<box><size>0.5 0.5 0.2</size></box>'
+    # 碰撞保持紧凑盒（0.5×0.5×0.2），与 python 后端 drone_radius/避障几何一致，物理行为不变；
+    # 视觉升级为四旋翼：机身 + 顶部盖板 + 4 机臂 + 4 电机 + 4 螺旋桨（均仅视觉，无碰撞）。
+    col_box = '<box><size>0.5 0.5 0.2</size></box>'
+
+    vis = []
+    # 中心机架（机身，用各机颜色）
+    vis.append(vis_pose("chassis", '<box><size>0.16 0.16 0.05</size></box>',
+                        (r, g, b), 0, 0, 0))
+    # 顶部盖板（飞控/电池仓，深色）
+    vis.append(vis_pose("top", '<box><size>0.09 0.09 0.015</size></box>',
+                        (0.16, 0.16, 0.18), 0, 0, 0.033))
+    # 机头航向标记（+X 方向小红点，便于观察朝向）
+    vis.append(vis_pose("nose", '<box><size>0.03 0.03 0.035</size></box>',
+                        (0.95, 0.25, 0.20), 0.085, 0, 0.01))
+    # 十字型四旋翼：4 机臂 + 电机 + 螺旋桨
+    motor = '<cylinder><radius>0.032</radius><length>0.03</length></cylinder>'
+    prop = '<cylinder><radius>0.10</radius><length>0.006</length></cylinder>'
+    for k, (dx, dy) in enumerate([(1, 0), (-1, 0), (0, 1), (0, -1)]):
+        arm = ('<box><size>0.24 0.024 0.016</size></box>' if dx != 0
+               else '<box><size>0.024 0.24 0.016</size></box>')
+        ax, ay = dx * 0.12, dy * 0.12   # 机臂中心
+        tx, ty = dx * 0.24, dy * 0.24   # 电机/桨中心
+        vis.append(vis_pose("arm%d" % k, arm, (0.24, 0.24, 0.26), ax, ay, 0.01))
+        vis.append(vis_pose("motor%d" % k, motor, (0.33, 0.33, 0.35), tx, ty, 0.032))
+        vis.append(vis_pose("prop%d" % k, prop, (0.82, 0.82, 0.84, 0.55), tx, ty, 0.062))
+
     return """<model name="drone_%d">
   <pose>%.2f %.2f 1.0 0 0 0</pose>
   <link name="base_link">
@@ -159,14 +191,14 @@ def drone_model(i, x, y):
                <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
     </inertial>
     %s
-    %s
+%s
   </link>
   <plugin name="drone_vel_%d" filename="libdrone_vel_plugin.so">
     <drone_id>%d</drone_id>
     <kp>3.0</kp>
     <g>9.81</g>
   </plugin>
-</model>""" % (i, x, y, col_geo(box), vis_geo(box, mat(r, g, b)), i, i)
+</model>""" % (i, x, y, col_geo(col_box), "\n".join(vis), i, i)
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +380,7 @@ def build():
     n_tree = n_bush = 0
     for ob in scene.obstacles:
         if ob.kind == "tree":
-            out.append(tree_model(ob.id, ob.lo, ob.hi))
+            out.append(tree_model(ob.id, ob))
             n_tree += 1
         elif ob.kind == "bush":
             out.append(bush_model(ob.id, ob.lo, ob.hi))

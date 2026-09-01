@@ -81,10 +81,10 @@ class Verifier:
         except Exception as e:
             log("start service FAIL:", e)
 
-        log("=== observation (150s, sample every 5s) ===")
+        log("=== observation (450s, sample every 5s) ===")
         last_state = None
         t0 = time.time()
-        while time.time() - t0 < 150:
+        while time.time() - t0 < 450:
             if self.state != last_state:
                 last_state = self.state
                 log("-- state ->", self.state, "@ %.0fs" % (time.time() - t0))
@@ -105,6 +105,11 @@ class Verifier:
         log("match:", {k: v for k, v in sorted(self.match.items())})
         log("odom drone0:", self.odom.get(0))
         log("score_summary:", self.score_summary)
+        # 通过判定：全部 DONE（永久冻结的机永远到不了 DONE）+ 全部 MATCH
+        ok = (self.state == "DONE"
+              and all(self.phases.get(i) == "DONE" for i in range(6))
+              and all(self.match.get(i) == "MATCH" for i in range(6)))
+        log("VERDICT:", "PASS" if ok else "FAIL")
         out.close()
 
 

@@ -33,6 +33,8 @@ class MissionExecutor:
         ns = "/drone_%d" % self.drone_id
 
         self.scene = Scene()
+        # 非凸-α 编队协调层：本机相对共享航点的偏移（None = 未开启）
+        self.formation_offset = self._compute_formation_offset()
         rules = cfg.load("competition_rules.yaml")
         h = rules["heights"]
         self.takeoff_hover_z = float(h.get("takeoff_hover_z", 1.5))
@@ -143,7 +145,33 @@ class MissionExecutor:
                           self.drone_id, self.drone_id * self.return_stagger)
 
     # ---------------------------------------------------------------- helpers
-    def _goto(self, xyz):
+    def _compute_formation_offset(self):
+        """非凸-α 编队协调层：计算本机相对共享航点的偏移。
+
+        返回 3 元组 (dx, dy, dz) 或 None（未开启）。
+        reference=pad0 时按「相对 0 号机起降点」保持初始相对位置；
+        reference=explicit 时读取 formation.yaml 的 offsets[drone_id]（对齐真机 formation/drone*）。
+        """
+        fc = cfg.load("formation.yaml").get("formation", {})
+        if not fc.get("enabled", False):
+            return None
+        ref = fc.get("reference", "pad0")
+        if ref == "explicit":
+            offs = fc.get("offsets", []) or []
+            if self.drone_id < len(offs):
+                o = offs[self.drone_id]
+                return (float(o[0]), float(o[1]), float(o[2]))
+            return (0.0, 0.0, 0.0)
+        pads = self.scene.get_pads()
+        p0 = pads[0] if pads else (0.0, 0.0)
+        pi = pads[self.drone_id] if self.drone_id < len(pads) else (0.0, 0.0)
+        return (float(pi[0]) - float(p0[0]), float(pi[1]) - float(p0[1]), 0.0)
+
+    def _goto(self, xyz, formation=False):
+        if formation and self.formation_offset is not None:
+            xyz = (xyz[0] + self.formation_offset[0],
+                   xyz[1] + self.formation_offset[1],
+                   xyz[2] + self.formation_offset[2])
         g = PoseStamped()
         g.header.frame_id = "world"
         g.header.stamp = rospy.Time.now()
@@ -181,9 +209,9 @@ class MissionExecutor:
                 self.retry = 0
                 self.crossed_zone = False
                 self.pub_crossed.publish(Bool(data=False))
-                # 先飞向穿越区中心，进入后再转向投放点
+                # 先飞向穿越区中心（编队协调层：加每机偏移展开成队形），进入后再转向投放点
                 cz = self.scene.crossing_zone_center
-                self._goto((cz[0], cz[1], self.cruise_z))
+                self._goto((cz[0], cz[1], self.cruise_z), formation=True)
                 self._pending = "CROSS_ZONE"
                 rospy.loginfo("drone %d heading to crossing zone (%.1f, %.1f)",
                               self.drone_id, cz[0], cz[1])
