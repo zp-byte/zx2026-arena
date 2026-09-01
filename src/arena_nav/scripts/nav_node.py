@@ -57,6 +57,14 @@ class NavNode:
         # 在 est 系（est=truth+drift），漂移背向最近障碍时 est 距离比真值大
         # |drift·u|——控制器高估裕度，真值裕度被侵蚀，平衡点压进接触。
         self._dam_enabled = bool(cl.get("drift_aware_margin", {}).get("enabled", False))
+        # ---- 近停区（2026-08-31 碰撞法证另一半机制） --------------------------------
+        # vcap 0.35 地板意味着贴脸仍保底 0.53m/s，goal/云推力把平衡点压进接触。
+        # 近停区：距 goal<zone_r 时地板线性衰减，deadband 处归零——允许真正刹停。
+        # de 逃逸期间不衰减（逃逸方向已过点云走廊验证，地板是安全项不是风险项）。
+        nsz = cl.get("near_stop_zone", {}) or {}
+        self._nstop_enabled = bool(nsz.get("enabled", False))
+        self._nstop_zone_r = float(nsz.get("zone_r", 1.0))
+        self._nstop_deadband = float(nsz.get("deadband", 0.2))
         self.replan_hz = float(cl.get("replan_hz", 10.0))
         self.closed_max_vel = float(cl.get("max_vel", 1.5))
         self._rng = random.Random(int(settings.get("run_seed", 42)) + self.drone_id * 7919)
@@ -455,6 +463,23 @@ class NavNode:
                          self.drift[2] * best_u[2]))
         return max(0.0, best - ero), ero
 
+    def _nstop_scale(self):
+        """近停区地板衰减系数：距 goal<zone_r 线性衰减，deadband 处归 0。
+
+        治 2026-08-31 法证的挤压机制：vcap 地板 0.35 贴脸仍保底 0.53m/s，
+        前推力把平衡点压进真值接触。仅作用于非 dam 分支的地板（dam 开时以
+        dam 衰减为准，二者不同开）。flag 关 / de 逃逸中 / goal 缺失 → 1.0
+        （逐位原行为）。
+        """
+        if not self._nstop_enabled or self._de_active or self.goal is None:
+            return 1.0
+        dg = math.hypot(self.odom[0] - self.goal[0],
+                        self.odom[1] - self.goal[1])
+        if dg >= self._nstop_zone_r:
+            return 1.0
+        span = max(1e-6, self._nstop_zone_r - self._nstop_deadband)
+        return max(0.0, min(1.0, (dg - self._nstop_deadband) / span))
+
     @staticmethod
     def _dilate_rect(occ, k):
         """对矩形布尔栅格做 k 次 8 邻域膨胀（numpy 移位，兼容非方阵）。"""
@@ -681,6 +706,8 @@ class NavNode:
         的慢挤入（2026-08-31 三次碰撞法证：接触时速度 0.12-0.98 m/s，全为低速
         挤入）。地板连续衰减而非硬冻结，避免复辟 P2 scale→0 磨树病灶。
         关闭时逐位原行为（floor 恒 0.35、用原始 clearance）。
+        近停区（near_stop_zone）开启时，本分支地板乘 _nstop_scale() 衰减
+        （距 goal<zone_r 线性降到 deadband 处 0）；关时 scale 恒 1.0 逐位不变。
         """
         vcap = self.closed_max_vel
         if self._dam_enabled:
@@ -689,7 +716,8 @@ class NavNode:
                 floor = 0.35 * max(0.0, 1.0 - ero / self.drift_max)
                 vcap = self.closed_max_vel * max(floor, eff / 2.0)
         elif clearance < 2.0:
-            vcap = self.closed_max_vel * max(0.35, clearance / 2.0)
+            vcap = self.closed_max_vel * max(0.35 * self._nstop_scale(),
+                                             clearance / 2.0)
         vn = float(np.linalg.norm(cmd))
         if vn > vcap:
             cmd = cmd * (vcap / vn)
