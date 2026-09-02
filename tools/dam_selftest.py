@@ -8,6 +8,8 @@
   D3 开态限速：全额侵蚀时 0.35 地板衰减到 0，vcap 用 eff（严于关态）
   D4 关态逐位原行为：vcap 公式与旧实现一致（含 floor 0.35 与不减速区）
   D5 部分侵蚀：地板按侵蚀占比连续衰减，eff/2 为主、地板兜底
+  D6 v2 深近区门控：eff≥deep_r(0.7) 地板不衰减、逐位回基线公式；
+     eff<deep_r 才走 dam 衰减（v1 的全域衰减是 P45 任务级减速根因）
 """
 import importlib.util
 import math
@@ -28,6 +30,13 @@ def make_self(dam_enabled, drift=(0.0, 0.0, 0.0), cloud=None):
     s.cloud = cloud if cloud is not None else [(0.8, 0.0, 2.5)]  # 正右方 0.8m
     s.drift = np.array(drift)
     s._dam_enabled = dam_enabled
+    s._dam_deep_r = 0.7
+    s._nstop_enabled = False
+    s._de_active = False
+    s.goal = None
+    s._nstop_zone_r = 1.0
+    s._nstop_deadband = 0.2
+    s._nstop_scale = types.MethodType(H._nstop_scale, s)
     s.closed_max_vel = 1.5
     s.drift_max = 0.3
     s._dam_clearance = types.MethodType(H._dam_clearance, s)
@@ -86,5 +95,16 @@ out = s._apply_vcap(np.array([1.0, 0.0, 0.0]), 0.25)
 # eff=0.10 → eff/2=0.05 < floor 0.175 → 地板兜底 vcap=0.2625（旧值 0.525 的一半）
 assert abs(np.linalg.norm(out) - 1.5 * 0.175) < 1e-9
 print("D5 PASS")
+
+# ---- D6 v2 深近区门控：eff≥deep_r 回落基线地板（v1 会衰减） -------------------
+s = make_self(True, drift=(-0.2, 0.0, 0.0), cloud=[(1.0, 0.0, 2.5)])
+out = s._apply_vcap(np.array([2.0, 0.0, 0.0]), 1.0)
+# eff=0.8 ≥ 0.7 → 基线公式 max(0.35, 0.5) → vcap=0.75（v1 会给 floor 0.175→0.2625）
+assert abs(np.linalg.norm(out) - 0.75) < 1e-9, np.linalg.norm(out)
+s = make_self(True, drift=(-0.2, 0.0, 0.0), cloud=[(0.65, 0.0, 2.5)])
+out = s._apply_vcap(np.array([2.0, 0.0, 0.0]), 0.65)
+# eff=0.45 < 0.7 → dam 公式：floor 0.175，eff/2=0.225 → vcap=0.3375
+assert abs(np.linalg.norm(out) - 1.5 * 0.225) < 1e-9, np.linalg.norm(out)
+print("D6 PASS")
 
 print("ALL SELFTEST PASS")

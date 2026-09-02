@@ -57,6 +57,11 @@ class NavNode:
         # 在 est 系（est=truth+drift），漂移背向最近障碍时 est 距离比真值大
         # |drift·u|——控制器高估裕度，真值裕度被侵蚀，平衡点压进接触。
         self._dam_enabled = bool(cl.get("drift_aware_margin", {}).get("enabled", False))
+        # v2 深近区门控：地板衰减只在 eff<deep_r 内生效。0.7 = 基线地板 bind
+        # 边界（max(0.35, clr/2) 中 clr/2<0.35 ⟺ clr<0.7）——dam 恰好只接管
+        # "基线地板本来就要兜底"的贴脸带，带外逐位回基线。v1 全域衰减的
+        # 任务级减速（P45 满窗 FAIL）由此结构性排除。
+        self._dam_deep_r = float(cl.get("drift_aware_margin", {}).get("deep_r", 0.7))
         # ---- 近停区（2026-08-31 碰撞法证另一半机制） --------------------------------
         # vcap 0.35 地板意味着贴脸仍保底 0.53m/s，goal/云推力把平衡点压进接触。
         # 近停区：距 goal<zone_r 时地板线性衰减，deadband 处归零——允许真正刹停。
@@ -712,9 +717,16 @@ class NavNode:
         vcap = self.closed_max_vel
         if self._dam_enabled:
             eff, ero = self._dam_clearance()
-            if eff < 2.0:
+            if eff < self._dam_deep_r:
+                # 深近区（v2）：地板随侵蚀占比连续衰减到 0。v1 在 eff<2.0 全域
+                # 衰减，持续向量漂移背对走廊时整条腿地板归零 → 任务级减速
+                # （P45 满窗 FAIL）；v2 收缩到贴脸带（0.7=基线地板 bind 边界），
+                # 接触只发生在这里，带外逐位回基线公式。
                 floor = 0.35 * max(0.0, 1.0 - ero / self.drift_max)
                 vcap = self.closed_max_vel * max(floor, eff / 2.0)
+            elif clearance < 2.0:
+                vcap = self.closed_max_vel * max(0.35 * self._nstop_scale(),
+                                                 clearance / 2.0)
         elif clearance < 2.0:
             vcap = self.closed_max_vel * max(0.35 * self._nstop_scale(),
                                              clearance / 2.0)
