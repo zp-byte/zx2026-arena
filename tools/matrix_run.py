@@ -154,11 +154,15 @@ def _run_once(cell, outdir):
     if cell.get("dam") is not None:
         set_key_in_block(CFG, "drift_aware_margin", "enabled",
                          "true" if cell["dam"] else "false")
-    # 近停区/膨胀裕度：无条件设置——补丁跨 cell 累积，缺省值也必须显式落盘
-    # （否则上一 cell 的 inflation 会泄漏进未声明 infl 的 cell）
+    # 近停区/膨胀裕度/恢复仲裁：无条件设置——补丁跨 cell 累积，缺省值也
+    # 必须显式落盘（否则上一 cell 的 inflation/开关会泄漏进未声明的 cell）
     set_key_in_block(CFG, "near_stop_zone", "enabled",
                      "true" if cell.get("nstop") else "false")
     set_key_in_block(CFG, "nav", "inflation", cell.get("infl", 0.4))
+    set_key_in_block(CFG, "rescue_mutex", "enabled",
+                     "true" if cell.get("rm") else "false")
+    set_key_in_block(CFG, "bounce_corridor", "enabled",
+                     "true" if cell.get("bc") else "false")
 
     t0 = time.time()
     m0 = time.monotonic()

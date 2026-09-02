@@ -130,6 +130,17 @@ class NavNode:
         self._de_ok_t0 = None          # 退出迟滞：规划连续成功起点（None=未在成功中）
         self._stall_t0 = None          # 停滞看门狗起点（诊断日志用）
 
+        # ---- 恢复链路仲裁（2026-09-02 drone5 级联法证后的修复对） ----
+        # M1 救援互斥：de 逃逸进行中或规划连续失败期间 goal-seal 盲推禁发
+        # （两救援方向相反 → 原地研磨 + flip 风暴，drone5 单机 220s+6 碰撞）。
+        rm = cl.get("rescue_mutex", {})
+        self._rm_enabled = bool(rm.get("enabled", False))
+        # M2 bounce 走廊化：逃逸方向评分加连续走廊裕度项——同样可达时偏好
+        # 宽走廊，抑制窄点两侧反向弹摆（drone3 ±0.99 同 y 双撞形态）。
+        bc = cl.get("bounce_corridor", {})
+        self._bc_enabled = bool(bc.get("enabled", False))
+        self._bc_w = float(bc.get("corridor_w", 1.0))
+
         # ---- P2 指令否决层（DeFoP M1 几何安全监督移植） ----
         vt = cl.get("veto_gate", {})
         self._vt_enabled = bool(vt.get("enabled", False))
@@ -645,7 +656,8 @@ class NavNode:
                     self._gs_active = False
                     self._gs_stall_t0 = None
                     rospy.loginfo("nav_node: drone %d goal-seal cycle timeout", self.drone_id)
-            elif gocc is True and float(np.linalg.norm(self.v_odom)) < 0.15:
+            elif (gocc is True and float(np.linalg.norm(self.v_odom)) < 0.15
+                  and not self._gs_mutex_block()):
                 if self._gs_stall_t0 is None:
                     self._gs_stall_t0 = now
                 elif now - self._gs_stall_t0 >= self._gs_stall_s:
@@ -799,6 +811,16 @@ class NavNode:
         return False
 
     # ---- P3 死端基元逃逸（DeFoP motion primitives 移植，仅借死端脱困） --------
+    def _gs_mutex_block(self):
+        """M1 救援互斥：de 逃逸进行中或规划连续失败（含 de confirm 窗口）时
+        goal-seal 禁发。drone5 法证：盲推在 de 活跃/plan_fail 持续期间照样
+        发射 → 双救援方向相反 → 原地研磨 + flip 风暴。优先级"谁先激活谁持
+        轮"：gs 激活期间 _de_tick 本就不跑；互斥只挡 gs 的触发竞态，逃逸
+        优先——先脱困，脱困后仍停滞 3s 再试直达（周期性试探保留）。"""
+        if not self._rm_enabled:
+            return False
+        return self._de_active or self._plan_fail_since is not None
+
     def _de_tick(self, now):
         """逃逸状态机：规划连续失败 confirm_s 进入；规划连续稳定 exit_hyst_s 才退出。
 
@@ -921,9 +943,37 @@ class NavNode:
                         reach = d
                 d += step
             score = reach + self._de_goal_bias * (dx * gx + dy * gy) / gn
+            if self._bc_enabled and reach > 0.0:
+                # M2 bounce 走廊化：入口二值检查只看前 cloud_r 窗口，本项看
+                # 整条可达段的最小侧距——入口过得了、前方收窄的方向被压分。
+                # 同样可达时偏好宽走廊，抑制窄点两侧反向弹摆。
+                score += self._bc_w * self._bc_corridor_margin(dx, dy, reach)
             if score > best_s:
                 best_s, best, best_reach = score, (dx, dy), reach
         return best if best_reach > 0.0 else None
+
+    def _bc_corridor_margin(self, dx, dy, reach):
+        """M2 bounce 走廊化：候选方向沿线 [0,reach] 段到点云（z 带过滤，与
+        入口检查同参数）的最小侧向距离，截断到 cloud_clear_r 归一到 [0,1]。
+        无点云（传感空窗）返回 1.0 中性值——不改变可达性判定，只参与计分。"""
+        cloud = getattr(self, 'cloud', None) or []
+        if not cloud:
+            return 1.0
+        pz = self.odom[2]
+        dr = self.scene.drone_radius
+        m = self._de_cloud_r
+        for (x, y, z) in cloud:
+            if z < pz - dr or z > pz + dr:
+                continue
+            ex = x - self.est_pos[0]
+            ey = y - self.est_pos[1]
+            t = ex * dx + ey * dy
+            if t <= 0.0 or t > reach:
+                continue
+            perp = abs(ex * dy - ey * dx)
+            if perp < m:
+                m = perp
+        return m / self._de_cloud_r
 
     # ---- god-mode：全局 A* 跟随（原版逻辑） ---------------------------------
     def _god_mode_cmd(self):

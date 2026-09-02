@@ -126,6 +126,32 @@ closed_loop:
     zone_r: 1.0             # 近停区半径 (m)，距 goal 小于该值地板开始衰减
     deadband: 0.2           # 距 goal 该值内地板恒 0（允许微调刹停）
 
+  # ---- 恢复链路仲裁（2026-09-02 drone5 级联法证后的修复对） ----
+  # M1 救援互斥：de 逃逸进行中或规划连续失败（含 confirm 窗口）期间，
+  # goal-seal 盲推禁发——drone5 法证（live 151 分 run）：盲推在 de 活跃/
+  # plan_fail 持续 14.7-24.6s 期间发射 7 次 → 双救援反向 → 原地研磨
+  # （STALL 30s 挪 0.02m）+ flip 风暴（10-53 次/10s）→ 单机 220s+6 碰撞。
+  # 优先级"谁先激活谁持轮"：gs 激活期间 _de_tick 本就不跑，互斥只挡 gs
+  # 触发竞态，逃逸优先；脱困后仍停滞 3s 再试直达，周期性试探保留。
+  # M2 bounce 走廊化：逃逸方向评分加连续走廊裕度项——可达段 [0,reach]
+  # 最小侧距 / cloud_clear_r 归一到 [0,1]（入口二值检查语义不变），同样
+  # 可达时偏好宽走廊，抑制窄点两侧反向弹摆（drone3 ±0.99 同 y 双撞形态）。
+  # 【2026-09-02 翻默认 true（双开=X臂）】A/B（run_logs/rescue_20260902_175328，
+  # seed 42/43/45 四臂同码）：O 臂 2/3 PASS（O42 慢绕满窗 FAIL：6/6 MATCH
+  # 但两机返航超时）+ col 4/5；M 臂 col 2.33 3/3 PASS；X 臂最优——col 1.67、
+  # minclr 0.392（其余臂 0.24-0.27）、stuck 27.6s，3/3 PASS，X43 col=0。
+  # 同 seed 逐对全改善（M/X 4/4 干净对全 < O）。单开 B 臂不稳（B43 col=5
+  # stuck 86.7s 高 churn）——走廊化须与互斥合开。触发日志：13 run 解析
+  # M/X 臂 0 起 GS-during-DE 违例（O 臂本轮未现该形态，无反事实——互斥
+  # 因果证据=live 法证+R2-R4 自测；翻默认主依据=结果性 A/B）。
+  # O42 满窗 FAIL 定性：真睡眠未涉（检测器未触发），系慢绕超时；M43 的
+  # 7621s 漂移=真实系统睡眠 2h，检测器抓到自动重跑，净数据不受影响。
+  rescue_mutex:
+    enabled: true           # 【2026-09-02 翻默认 true】见上判词
+  bounce_corridor:
+    enabled: true           # 【2026-09-02 翻默认 true】见上判词
+    corridor_w: 1.0         # 裕度权重（reach 单位 m，裕度归一 [0,1]）
+
   # ---- P3 死端基元逃逸（DeFoP motion primitives 移植，仅借死端脱困） ----------------
   # 矩阵实测 2/14 cell FAIL 同因：碰撞标记（自机 est 格）膨胀成壳封死自格 →
   # _plan_global None → 永久悬停。触发后做基元逃逸：n_dirs 个均匀方向在占用栅格
