@@ -141,6 +141,19 @@ class NavNode:
         self._bc_enabled = bool(bc.get("enabled", False))
         self._bc_w = float(bc.get("corridor_w", 1.0))
 
+        # ---- 全史碰撞聚类驱动的两项避障优化（2026-09-03，默认关） ----
+        # 734 事件（python 706 + gazebo 28）聚类：Top4 树占 41%，主形态=
+        # 分离硬推（障碍全盲）与云避障拔河，残余分量 + vcap 地板挤入接触。
+        # M3 分离增量障碍投影：分离增量不许含指向贴身障碍的分量（保切向）。
+        sg = cl.get("sep_obs_guard", {})
+        self._soa_enabled = bool(sg.get("enabled", False))
+        # M4 热点树定向膨胀：对配置的热点树世界坐标格 +extra_cells 膨胀，
+        # A* 提前绕开——只加热点格，不重蹈全局 inflation 0.9 的绕行超窗。
+        hi = cl.get("hotspot_inflate", {})
+        self._hi_enabled = bool(hi.get("enabled", False))
+        self._hi_extra = int(hi.get("extra_cells", 1))
+        self._hi_trees = [tuple(map(float, t)) for t in hi.get("trees", [])]
+
         # ---- P2 指令否决层（DeFoP M1 几何安全监督移植） ----
         vt = cl.get("veto_gate", {})
         self._vt_enabled = bool(vt.get("enabled", False))
@@ -411,6 +424,16 @@ class NavNode:
                 occ[iy, ix] = True
         infl = int(math.ceil(self.inflation / self.res))
         occ = self._dilate_rect(occ, infl)
+        # 热点树定向膨胀：全史碰撞聚类 Top 树额外 +extra_cells，A* 提前绕开
+        # （只加热点格；全局 inflation 0.9 的绕行超窗教训不重蹈，默认关）
+        if self._hi_enabled and self._hi_trees:
+            mask = np.zeros((self.g_ny, self.g_nx), dtype=bool)
+            for (wx, wy) in self._hi_trees:
+                hx, hy = self._g_to_cell(wx, wy)
+                if 0 <= hx < self.g_nx and 0 <= hy < self.g_ny:
+                    mask[hy, hx] = True
+            if mask.any():
+                occ = occ | self._dilate_rect(mask, max(1, self._hi_extra))
         # 清空自机足迹（膨胀后自机所在格必可通行，避免起点被占死锁）
         ci, cj = self._g_to_cell(self.est_pos[0], self.est_pos[1])
         for iy in range(max(0, cj - 1), min(self.g_ny, cj + 2)):
@@ -1058,6 +1081,7 @@ class NavNode:
 
     # ---- 多机分离（两模式共用） ---------------------------------------------
     def _apply_separation(self, cmd):
+        pre = np.array(cmd) if self._soa_enabled else None
         hard_r = 2.0 * self.scene.drone_radius + 1.1
         for j, nj in self.neighbors.items():
             dx = self.odom[0] - nj[0]
@@ -1079,9 +1103,45 @@ class NavNode:
                     cmd[0] -= push * ux
                     cmd[1] -= push * uy
                     cmd[2] -= push * uz
+        if pre is not None:
+            cmd = self._sep_obs_guard(cmd, pre)
         vn = np.linalg.norm(cmd)
         if vn > self.max_vel:
             cmd = cmd * (self.max_vel / vn)
+        return cmd
+
+    def _sep_obs_guard(self, cmd, pre):
+        """分离增量障碍投影：把分离增量中指向贴身障碍的分量投影掉（保切向）。
+
+        分离/硬推本身障碍全盲，把机往树上推后靠云避障拔河，残余 + vcap
+        地板即挤入形态（全史聚类主因，tree#24 双向撞/跟车同点连撞均此）。
+        机间防撞语义不变：树在两机之间时投影后推力为零，几何上不可能因此
+        发生机间接触（树挡着则本就不可达）。
+        """
+        dsep = np.array([cmd[0] - pre[0], cmd[1] - pre[1]])
+        if float(np.linalg.norm(dsep)) < 1e-6:
+            return cmd
+        px, py, pz = self.odom[0], self.odom[1], self.odom[2]
+        dr = self.scene.drone_radius
+        guard_r = dr + 0.9
+        changed = False
+        for (x, y, z) in (self.cloud or []):
+            if z < pz - dr or z > pz + dr:
+                continue
+            ex = x - px
+            ey = y - py
+            d = math.sqrt(ex * ex + ey * ey)
+            if d < 1e-6 or d > guard_r + 0.6:
+                continue
+            ux, uy = ex / d, ey / d
+            into = dsep[0] * ux + dsep[1] * uy
+            if into > 0.0:
+                dsep[0] -= into * ux
+                dsep[1] -= into * uy
+                changed = True
+        if changed:
+            cmd[0] = pre[0] + float(dsep[0])
+            cmd[1] = pre[1] + float(dsep[1])
         return cmd
 
     # ---- 闭环：点云动量感知避障（安全网） -----------------------------------

@@ -163,6 +163,10 @@ def _run_once(cell, outdir):
                      "true" if cell.get("rm") else "false")
     set_key_in_block(CFG, "bounce_corridor", "enabled",
                      "true" if cell.get("bc") else "false")
+    set_key_in_block(CFG, "sep_obs_guard", "enabled",
+                     "true" if cell.get("soa") else "false")
+    set_key_in_block(CFG, "hotspot_inflate", "enabled",
+                     "true" if cell.get("hi") else "false")
 
     t0 = time.time()
     m0 = time.monotonic()
