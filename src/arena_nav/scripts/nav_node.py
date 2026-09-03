@@ -239,7 +239,7 @@ class NavNode:
         self.neighbor_vel = {}     # {j: (vx,vy,vz)} 邻居速度（odom twist）
         self.v_odom = np.zeros(3)  # 本机速度（odom twist）
 
-        # ---- W1 swarm 层治理（2026-09-03 贴树判官团定稿，默认关） ----
+        # ---- W1 swarm 层治理（2026-09-03 贴树判官团定稿，matrix_w1b 后默认开） ----
         # obs_guard：聚合/对齐增量过 sep_obs_guard 同款投影（保切向）。代码
         # 事实：_apply_separation 的 pre-guard 只管分离增量，_apply_swarm 的
         # coh/ali 直加无任何障碍管辖——obstacle_scale 只缩模不改向，分离

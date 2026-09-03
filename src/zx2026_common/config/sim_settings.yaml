@@ -49,24 +49,30 @@ swarm:
                             # 爬升/下降中的无人机被水平拉向巡航邻居
   min_z: 2.0                # 低于该高度不启用（避免起降/投放干扰）
   obstacle_scale: true      # 近障碍(<2m)时缩放群集力，防被拉进树
-  # ---- W1 swarm 层治理（2026-09-03 贴树判官团定稿） --------------------------------
+  # ---- W1 swarm 层治理（2026-09-03 贴树判官团定稿，matrix_w1b 翻默认） ----------
   obs_guard:                # 聚合/对齐增量过 sep_obs_guard 同款障碍投影（保切向）。
-    enabled: false          # 【默认关】代码事实：_apply_separation 的 pre-guard 只管
-                            # 分离增量，_apply_swarm 的 coh/ali 直加无任何障碍管辖
+    enabled: true           # 【默认开，matrix_w1b 20260903 12/12 后翻】代码事实：
+                            # _apply_separation 的 pre-guard 只管分离增量，
+                            # _apply_swarm 的 coh/ali 直加无任何障碍管辖
                             # （obstacle_scale 只缩模不改向）——734 碰撞聚类主因的聚合
-                            # 半边（Gazebo 实弹"挤入零 guard 行"头号根因）。待 W1
-                            # A/B 矩阵（同 seed 双臂 ×10）判据 col+闭合速度后翻默认。
+                            # 半边（Gazebo 实弹"挤入零 guard 行"头号根因）。A/B 证据：
+                            # D_full(三旗合开) 3/3 col=0 minclr 0.521（A 基线 0.399），
+                            # swarm_guard hit 仅 D 臂在场；B 单开 col 反升证明不可拆。
   rescue_quiet:             # 救援态（de 逃逸/gs 盲推/规划失败期）静默 coh/ali 两个聚
-    enabled: false          # 合项，退出后 ramp_s 线性爬坡重入。【默认关】聚合推
-    ramp_s: 2.5             # 0.4-0.8 m/s ≈ 逃逸基速 0.6 同量级，会改写逃逸矢量
-                            # （链内二次蹭 ×2 / 0.65s 即刻再暴露 / 跟车级联的公共力
-                            # 源）；分离与硬推层在下游照常，机间安全底线不动。
+    enabled: true           # 合项，退出后 ramp_s 线性爬坡重入。【默认开，matrix_w1b
+    ramp_s: 2.5             # 后翻】聚合推 0.4-0.8 m/s ≈ 逃逸基速 0.6 同量级，会改写
+                            # 逃逸矢量（链内二次蹭 ×2 / 0.65s 即刻再暴露 / 跟车级联
+                            # 的公共力源）；分离与硬推层在下游照常，机间安全底线不动。
                             # ramp_s=2.5 与 exit_hyst_s 同值同源（重入不早于救援确认）。
+                            # A/B 证据：quiet-window 数 ≈ de_engaged（C43 14:14），
+                            # C/D 对 B 收碰撞，单独 B 臂 col 2.0 不收。
 
 # ---- 任务层（W1 贴树判官团） --------------------------------------------------
 mission:
   via_slots:                # 越界点散点槽位：共享越界点=穿越区重心 (1.0,2.0) 几乎压在
-    enabled: false          # tree#24 (1.1,2.0) 树干上——六机漏斗串行 + goal 格恒占用
+    enabled: true           # tree#24 (1.1,2.0) 树干上——六机漏斗串行 + goal 格恒占用
+                            # 【默认开，matrix_w1b 20260903 后翻：zone_margin 修复
+                            # 绊线误杀后 12/12 全 PASS，D 臂 VIA-SLOT 18 行/回退 0】
     slot_clear: 1.5         # → A* 5×5 幻影豁免长期在线 + GOAL-SEAL 盲推。散点把汇聚
     slot_sep: 2.5           # 点换成 6 个真值净空验证过的点（吸引子层唯一修复，判官团
                             # Tier-1 首位）。y 向散开=zone 均分 6 条横带每带一槽

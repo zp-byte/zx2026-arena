@@ -158,7 +158,7 @@ class MissionExecutor:
         self.return_stagger = float(rules.get("return_stagger_s", 3.0))
         self.return_at = None
 
-        # ---- W1 via_slots：越界点散点槽位（默认关，配置 mission.via_slots） ----
+        # ---- W1 via_slots：越界点散点槽位（matrix_w1b 后默认开，配置 mission.via_slots） ----
         vs = cfg.load("sim_settings.yaml").get("mission", {}).get("via_slots", {}) or {}
         self._vs_enabled = bool(vs.get("enabled", False))
         self._vs_clear = float(vs.get("slot_clear", 1.5))
@@ -343,7 +343,7 @@ class MissionExecutor:
                 self.retry = 0
                 self.crossed_zone = False
                 self.pub_crossed.publish(Bool(data=False))
-                # W1 via_slots：逐机散点槽位替代共享穿越区重心（默认关）。
+                # W1 via_slots：逐机散点槽位替代共享穿越区重心（matrix_w1b 后默认开）。
                 # 槽位本身已散开承担编队展开职能，不再叠加 formation 偏移；
                 # 旗关或无可行槽位集时回退原共享点 + formation 偏移（逐位原行为）。
                 slot = self._pick_via_slot() if self._vs_enabled else None
