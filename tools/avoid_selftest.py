@@ -23,6 +23,13 @@ spec = importlib.util.spec_from_file_location(
     "nav_node", "/home/ubuntu/zx2026_arena_ws/src/arena_nav/scripts/nav_node.py")
 nav = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(nav)
+# W1 起 _sep_obs_guard 触发时打 loginfo_throttle（真 rospy 需 init_node），
+# 无 ROS 运行时的自测以桩替换（只桩日志/时钟，不碰被测数学）。
+nav.rospy = types.SimpleNamespace(
+    loginfo=lambda *a, **k: None,
+    loginfo_throttle=lambda *a, **k: None,
+    logwarn=lambda *a, **k: None,
+    get_time=lambda: 0.0)
 H = nav.NavNode
 
 DR = 0.35
@@ -31,6 +38,8 @@ DR = 0.35
 def make_sep(soa_enabled, neighbor_xy, cloud):
     s = types.SimpleNamespace()
     s._soa_enabled = soa_enabled
+    s.drone_id = 0                      # W1 遥测：guard 分桶计数/log 需要
+    s._soa_hits = {"sep": 0, "swarm": 0}  # W1 遥测：分桶计数器
     s.scene = types.SimpleNamespace(drone_radius=DR)
     s.odom = np.array([0.0, 0.0, 2.5])
     s.max_vel = 2.0

@@ -46,6 +46,13 @@ def make_self(occ, est, goal, res=0.5, cloud=None):
     s._de_goal_bias = 1.5
     s._de_ray = 3.0
     s._de_cloud_r = 1.0
+    # M2 bounce_corridor 桩补（落地时未同步 selftest，存量破损修复）
+    s._bc_enabled = False
+    s._bc_w = 1.0
+    # W1 rescue_quiet 桩补（de 退出爬坡窗钩子读旗；关=不置窗）
+    s._swq_enabled = False
+    s._swq_ramp = 2.5
+    s._swq_until = -1e9
     s.scene = types.SimpleNamespace(drone_radius=0.25)
     s.odom = np.array([est[0], est[1], 2.5])
     s.cloud = cloud if cloud is not None else []
@@ -140,6 +147,10 @@ def make_tick_self():
     s._de_exit_hyst = 2.5
     s._de_dwell = 1.2
     s._plan_fail_since = None
+    # W1 rescue_quiet 桩补（de 退出爬坡窗钩子读旗；关=不置窗）
+    s._swq_enabled = False
+    s._swq_ramp = 2.5
+    s._swq_until = -1e9
     s._de_pick_dir = lambda: (1.0, 0.0)
     s._de_dir_str = types.MethodType(H._de_dir_str, s)
     return s

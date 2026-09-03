@@ -33,6 +33,10 @@ def make_self(pc_enabled, ttl=45.0):
     s.inflation = 0.4
     s._pc_enabled = pc_enabled
     s._pc_ttl = ttl
+    # M4 hotspot_inflate 桩补（落地时未同步 selftest，存量破损修复）
+    s._hi_enabled = False
+    s._hi_extra = 1
+    s._hi_trees = []
     s._occ_cells = set()
     s._occ_seen = {}
     s._collision_obs = set()

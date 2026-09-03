@@ -1,3 +1,4 @@
+# W0 baseline snapshot (pre-W1, git 1d67233) -- bit-identity reference for w1_swarm_selftest.py. DO NOT EDIT.
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """arena_nav::nav_node — 单机规划与轨迹跟踪（每机一个）。
@@ -147,9 +148,6 @@ class NavNode:
         # M3 分离增量障碍投影：分离增量不许含指向贴身障碍的分量（保切向）。
         sg = cl.get("sep_obs_guard", {})
         self._soa_enabled = bool(sg.get("enabled", False))
-        # guard 触发分桶计数（sep/swarm 各自计，零也打——零触发≠未需要，
-        # 是 Gazebo"挤入零 guard 行"判读的证据链）。纯观测，不挂旗。
-        self._soa_hits = {"sep": 0, "swarm": 0}
         # M4 热点树定向膨胀：对配置的热点树世界坐标格 +extra_cells 膨胀，
         # A* 提前绕开——只加热点格，不重蹈全局 inflation 0.9 的绕行超窗。
         hi = cl.get("hotspot_inflate", {})
@@ -239,26 +237,6 @@ class NavNode:
         self.neighbor_vel = {}     # {j: (vx,vy,vz)} 邻居速度（odom twist）
         self.v_odom = np.zeros(3)  # 本机速度（odom twist）
 
-        # ---- W1 swarm 层治理（2026-09-03 贴树判官团定稿，默认关） ----
-        # obs_guard：聚合/对齐增量过 sep_obs_guard 同款投影（保切向）。代码
-        # 事实：_apply_separation 的 pre-guard 只管分离增量，_apply_swarm 的
-        # coh/ali 直加无任何障碍管辖——obstacle_scale 只缩模不改向，分离
-        # guard 反把 swarm 增量当"受保护 pre 意图"对待。734 聚类主因的聚合
-        # 半边由此补全（Gazebo 实弹"挤入零 guard 行"头号根因，控制/群集两
-        # 视角独立实锤）。
-        self._swg_enabled = bool(sw.get("obs_guard", {}).get("enabled", False))
-        # rescue_quiet：救援态（de 逃逸/gs 盲推/规划失败期）静默 coh/ali 两个
-        # 聚合项——聚合推 0.4-0.8 m/s 与逃逸基速 0.6 同量级，救援期间不改写
-        # 逃逸矢量（链内二次蹭 ×2 / 0.65s 即刻再暴露 / 跟车级联的公共力源）；
-        # 分离与 hard_r 硬推层在下游 _apply_separation 照常（机间安全底线
-        # 不动）。与 rescue_mutex 同思想：mutex 仲裁 de/gs 两救援原语互抗，
-        # 本项移除救援期间的第三方力源（群集）。退出迟滞 ramp_s 与
-        # exit_hyst_s 同值同源（2.5）：群集重入不应早于救援退出确认。
-        swq = sw.get("rescue_quiet", {}) or {}
-        self._swq_enabled = bool(swq.get("enabled", False))
-        self._swq_ramp = float(swq.get("ramp_s", 2.5))
-        self._swq_until = -1e9     # 恢复爬坡重入截止时刻（de 退出时置 now+ramp）
-
         # ---- 通信模型（邻居信息经无线链路：延迟/丢包由 comm_model_node 模拟） ----
         # enabled=false 时保持直连订阅 /drone_j/odom → 与今天逐位一致（零侵入）。
         cm = settings.get("comms", {})
@@ -311,11 +289,10 @@ class NavNode:
 
         self.last_plan_t = -1.0
         rospy.loginfo("nav_node: drone %d closed_loop=%s max_vel=%.1f cruise_z=%.1f "
-                      "tc=%s de=%s veto=%s metrics=%s soa=%s swg=%s swq=%s",
+                      "tc=%s de=%s veto=%s metrics=%s",
                       self.drone_id, self.closed_loop, self.max_vel, self.cruise_z,
                       self.tc_enabled, self._de_enabled, self._vt_enabled,
-                      self.metrics_enabled, self._soa_enabled, self._swg_enabled,
-                      self._swq_enabled)
+                      self.metrics_enabled)
 
     # ---- callbacks ------------------------------------------------------------
     def _on_wind(self, msg):
@@ -363,35 +340,8 @@ class NavNode:
             self._path_force = True
         if self._de_enabled and self._de_active:
             self._de_t0 = -1e9   # 逃逸中再碰撞：下拍强制重选逃逸方向
-        # W1 遥测：接触法向闭合速度 + 接触距离。慢速贴树挤入是全史主形态
-        # （0.12-0.98 m/s 全低速带），闭合速度是它的定义性指标——比碰撞计数
-        # （A/B 主判据只有 ~20-30 事件/臂）高一个量级的判别力。纯观测。
-        v_close, clr_now = self._closing_speed()
-        rospy.loginfo("nav_node: drone %d collision marker at (%.1f,%.1f) cell (%d,%d) "
-                      "close=%.2f clr=%.2f",
-                      self.drone_id, self.est_pos[0], self.est_pos[1], cx, cy,
-                      v_close, clr_now)
-
-    def _closing_speed(self):
-        """接触法向闭合速度遥测：本机速度在"指向最近点云点"方向上的投影
-        （v·u，>0=向障碍闭合）与该点距离。碰撞瞬间采样，无点云返回 (0, 极大)。
-        只读状态不改行为；grep 前缀 "collision marker at" 保持不变。"""
-        v = self.v_odom
-        px, py, pz = self.odom[0], self.odom[1], self.odom[2]
-        dr = self.scene.drone_radius
-        best_d, best_u = 1e9, None
-        for (x, y, z) in (self.cloud or []):
-            if z < pz - dr or z > pz + dr:
-                continue
-            d = math.sqrt((x - px) ** 2 + (y - py) ** 2 + (z - pz) ** 2)
-            if d < best_d:
-                best_d = d
-                if d > 1e-6:
-                    best_u = ((x - px) / d, (y - py) / d, (z - pz) / d)
-        if best_u is None:
-            return 0.0, 1e9
-        return (float(v[0] * best_u[0] + v[1] * best_u[1] + v[2] * best_u[2]),
-                float(best_d))
+        rospy.loginfo("nav_node: drone %d collision marker at (%.1f,%.1f) cell (%d,%d)",
+                      self.drone_id, self.est_pos[0], self.est_pos[1], cx, cy)
 
     def _on_cloud(self, msg):
         # 解析 PointCloud2（x/y/z 三个 FLOAT32 字段）
@@ -916,11 +866,6 @@ class NavNode:
                     self._de_dir = None
                     self._de_fail_t0 = None
                     self._de_ok_t0 = None
-                    if self._swq_enabled:
-                        self._swq_until = now + self._swq_ramp   # 爬坡重入窗
-                        rospy.loginfo("nav_node: drone %d swarm quiet window "
-                                      "open (ramp %.1fs)", self.drone_id,
-                                      self._swq_ramp)
                     rospy.loginfo("nav_node: drone %d dead-end escape done (t=%.1fs)",
                                   self.drone_id, now - self._de_total_t0)
                     return
@@ -1102,21 +1047,6 @@ class NavNode:
     def _apply_swarm(self, cmd):
         if not self.swarm_enabled or self.odom[2] < self.swarm_min_z:
             return cmd
-        # W1 rescue_quiet：救援态静默 coh/ali（分离/硬推/云避障在下游照常，
-        # 机间与障碍安全底线不动）。含 _plan_fail_since：规划失败期 pre 已
-        # 悬停，聚合推成为唯一水平力，也一并静默。
-        if self._swq_enabled and (self._de_active or self._gs_active
-                                  or self._plan_fail_since is not None):
-            return cmd
-        # 恢复爬坡重入：de 退出后 ramp_s 内聚合增益线性回升（0→1）。Gazebo
-        # 法证：逃逸"成功"后 0.65s 即刻再暴露——聚合推力即刻满额回场是公共
-        # 时标。_swq_until 仅在 _swq_enabled 时被置位，此处开关粒度一致。
-        quiet = 1.0
-        if self._swq_enabled:
-            now_q = rospy.get_time()
-            if now_q < self._swq_until:
-                quiet = max(0.0, 1.0 - (self._swq_until - now_q)
-                            / max(self._swq_ramp, 1e-6))
         # 局部编组齐巡航才启用：任一感知半径内邻居未达巡航高度 → 关闭。
         # 起降区 pads 仅 1.5m 间隔 + 错峰起飞，此时无人机散布在各高度带，
         # 群集（尤其聚合）会把它们撮到一起撞机；等全组都上到巡航带再聚合。
@@ -1135,9 +1065,6 @@ class NavNode:
                     n_vel.append(v)
         if not n_pos:
             return cmd
-        # W1 obs_guard：快照聚合前的指令，coh/ali 叠加后过同款障碍投影。
-        # 投影保切向——树挡着时聚合方向本就不可达，剪掉朝树分量不丢可达性。
-        pre_sw = np.array(cmd) if self._swg_enabled else None
         coh = (np.mean(n_pos, axis=0) - np.array(self.odom)) * self.cohesion_gain
         if n_vel:
             ali = (np.mean(n_vel, axis=0) - self.v_odom) * self.alignment_gain
@@ -1149,13 +1076,8 @@ class NavNode:
                 s = max(0.0, cl / 2.0)
                 coh *= s
                 ali *= s
-        if quiet < 1.0:
-            coh = coh * quiet
-            ali = ali * quiet
         cmd[0] += coh[0] + ali[0]
         cmd[1] += coh[1] + ali[1]
-        if pre_sw is not None:
-            cmd = self._sep_obs_guard(cmd, pre_sw, tag="swarm")
         return cmd
 
     # ---- 多机分离（两模式共用） ---------------------------------------------
@@ -1189,16 +1111,13 @@ class NavNode:
             cmd = cmd * (self.max_vel / vn)
         return cmd
 
-    def _sep_obs_guard(self, cmd, pre, tag="sep"):
-        """分离/群集增量障碍投影：把增量中指向贴身障碍的分量投影掉（保切向）。
+    def _sep_obs_guard(self, cmd, pre):
+        """分离增量障碍投影：把分离增量中指向贴身障碍的分量投影掉（保切向）。
 
         分离/硬推本身障碍全盲，把机往树上推后靠云避障拔河，残余 + vcap
         地板即挤入形态（全史聚类主因，tree#24 双向撞/跟车同点连撞均此）。
-        W1 起 _apply_swarm 的 coh/ali 增量同走本函数（tag="swarm"）——聚合
-        增量直加原本无障碍管辖，是 734 聚类的聚合半边根因。
         机间防撞语义不变：树在两机之间时投影后推力为零，几何上不可能因此
         发生机间接触（树挡着则本就不可达）。
-        tag 仅用于分桶计数/遥测（_soa_hits），不影响投影数学。
         """
         dsep = np.array([cmd[0] - pre[0], cmd[1] - pre[1]])
         if float(np.linalg.norm(dsep)) < 1e-6:
@@ -1207,9 +1126,6 @@ class NavNode:
         dr = self.scene.drone_radius
         guard_r = dr + 0.9
         changed = False
-        hit_d = None            # 最近被投影障碍（遥测：距离/坐标/朝向分量）
-        hit_xy = (0.0, 0.0)
-        hit_into = 0.0
         for (x, y, z) in (self.cloud or []):
             if z < pz - dr or z > pz + dr:
                 continue
@@ -1224,14 +1140,7 @@ class NavNode:
                 dsep[0] -= into * ux
                 dsep[1] -= into * uy
                 changed = True
-                if hit_d is None or d < hit_d:
-                    hit_d, hit_xy, hit_into = d, (x, y), into
         if changed:
-            self._soa_hits[tag] = self._soa_hits.get(tag, 0) + 1
-            rospy.loginfo_throttle(
-                5.0, "nav_node: drone %d %s_guard hit n=%d obs=(%.2f,%.2f) "
-                "d=%.2f into=%.2f", self.drone_id, tag,
-                self._soa_hits[tag], hit_xy[0], hit_xy[1], hit_d, hit_into)
             cmd[0] = pre[0] + float(dsep[0])
             cmd[1] = pre[1] + float(dsep[1])
         return cmd

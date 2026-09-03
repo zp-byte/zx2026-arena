@@ -26,6 +26,103 @@ from zx2026_common.scene import Scene
 from zx2026_common.msg import Mission
 
 
+# ---------------------------------------------------------------------------
+# W1 via_slots（2026-09-03 贴树判官团）：越界点散点槽位
+# 共享越界点 = 穿越区重心 (1.0,2.0)，几乎压在 tree#24 (1.1,2.0) 树干上：
+# 六机漏斗串行过同一点 + goal 格恒被真树占用 → nav 侧"goal 周边 5×5 幻影
+# 豁免"长期在线 + 停滞 3s 时 GOAL-SEAL 0.8 m/s 朝真树盲推——吸引子层根因。
+# 散点槽位把六机汇聚点换成六个真值净空验证过的点，A* 与反应层完全自由
+# （零改道）。纯几何无 ROS，tools/ 自检脚本可直接 import 复用。
+# ---------------------------------------------------------------------------
+def _slot_clearance(scene, x, y, z_lo, z_hi):
+    """点 (x,y) 在 z 带 [z_lo,z_hi] 内对全部占用障碍的最小表面净空（m）。
+
+    与 Scene.collides_xy 同一障碍集合（fence/marker 低于巡航高度不算）：
+    树=树干圆盘表面距离，其余=AABB 盒表面距离。空场返回极大值。
+    """
+    best = 1e9
+    for ob in scene.obstacles:
+        if ob.kind in ("fence", "marker"):
+            continue
+        if ob.kind == "tree":
+            d = math.hypot(x - ob.cx, y - ob.cy) - ob.trunk_r
+        else:
+            if ob.hi[2] < z_lo or ob.lo[2] > z_hi:
+                continue
+            dx = max(ob.lo[0] - x, 0.0, x - ob.hi[0])
+            dy = max(ob.lo[1] - y, 0.0, y - ob.hi[1])
+            d = math.hypot(dx, dy)
+        if d < best:
+            best = d
+    return best
+
+
+def select_via_slots(scene, drone_count, slot_clear=1.5, slot_sep=2.5,
+                     cand_step=0.5, z_lo=2.0, z_hi=3.0):
+    """在穿越区内选 drone_count 个净空达标的散点槽位（纯几何，无 ROS）。
+
+    候选格按 cand_step 铺满穿越区，逐格过 in_crossing_zone + 表面净空
+    ≥ slot_clear 过滤（slot_clear 是安全地板永不降级）。y 向散开用结构化
+    分带保证：zone 均分 drone_count 条横带、每带取净空最高且与已选互距
+    ≥ slot_sep 的候选一槽（编队前散开意图由"每带一槽"结构性成立——
+    逐对 |Δy|≥spread 的贪心装箱在 8m 走廊放 6 槽是刀锋 packing，selftest
+    实测不可行，故弃）。某带无解时从剩余候选按净空降序补位；仍不足按
+    回退梯子放宽 slot_sep（2.5→2.2→2.0→1.8，末档候选区内缩 0.3m）。
+    返回 [(x, y, clearance), ...] 按 y 升序，调用方按 drop_y 名次对号
+    入座（各机本地同参计算 → 同一槽位集，无需跨机通信）；
+    无可行解返回 None（调用方回退共享越界点原行为）。
+    """
+    poly = scene.crossing_zone
+    if not poly:
+        return None
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    # 回退梯子：slot_sep 逐档放宽，末档候选区整体内缩（slot_clear 永不降）
+    for sep, inset in ((slot_sep, 0.0), (2.2, 0.0), (2.0, 0.0), (1.8, 0.3)):
+        x0, x1 = min(xs) + inset, max(xs) - inset
+        b0, b1 = min(ys) + inset, max(ys) - inset
+        if x1 < x0 or b1 < b0:
+            continue
+        band_h = (b1 - b0) / drone_count
+        bands = [[] for _ in range(drone_count)]
+        n_x = int(math.ceil((x1 - x0) / cand_step))
+        n_y = int(math.ceil((b1 - b0) / cand_step))
+        for iy in range(n_y + 1):
+            py = min(b0 + iy * cand_step, b1)
+            for ix in range(n_x + 1):
+                px = min(x0 + ix * cand_step, x1)
+                if not scene.in_crossing_zone((px, py)):
+                    continue
+                clr = _slot_clearance(scene, px, py, z_lo, z_hi)
+                if clr >= slot_clear:
+                    bi = min(int((py - b0) / band_h), drone_count - 1)
+                    bands[bi].append((clr, px, py))
+        for b in bands:
+            b.sort(reverse=True)      # 带内净空优先（同净空按坐标稳定排序）
+        slots = []
+        # Pass 1：每带一槽（编队前散开的结构保证）
+        for b in bands:
+            for clr, px, py in b:
+                if all(math.hypot(px - sx, py - sy) >= sep for sx, sy, _ in slots):
+                    slots.append((px, py, clr))
+                    break
+        # Pass 2：带解不足 → 剩余候选（不分带）按净空降序补位
+        if len(slots) < drone_count:
+            chosen = {(sx, sy) for sx, sy, _ in slots}
+            rest = [(clr, px, py) for b in bands for (clr, px, py) in b
+                    if (px, py) not in chosen]
+            rest.sort(reverse=True)
+            for clr, px, py in rest:
+                if len(slots) >= drone_count:
+                    break
+                if all(math.hypot(px - sx, py - sy) >= sep for sx, sy, _ in slots):
+                    slots.append((px, py, clr))
+        if len(slots) >= drone_count:
+            slots.sort(key=lambda t: t[1])    # 按 y 升序交付
+            return slots[:drone_count]
+    return None
+
+
 class MissionExecutor:
     def __init__(self):
         rospy.init_node("mission_executor_node", anonymous=True)
@@ -54,6 +151,13 @@ class MissionExecutor:
         # 防止六机同时涌入返航走廊（y≈6~7 林缘狭缝）互撞被永久冻结
         self.return_stagger = float(rules.get("return_stagger_s", 3.0))
         self.return_at = None
+
+        # ---- W1 via_slots：越界点散点槽位（默认关，配置 mission.via_slots） ----
+        vs = cfg.load("sim_settings.yaml").get("mission", {}).get("via_slots", {}) or {}
+        self._vs_enabled = bool(vs.get("enabled", False))
+        self._vs_clear = float(vs.get("slot_clear", 1.5))
+        self._vs_sep = float(vs.get("slot_sep", 2.5))
+        self._vs_slot = None    # 本机槽位（EXECUTE 入场时选定并缓存；None=回退共享点）
 
         self.state = "IDLE"
         self.mission = None
@@ -180,6 +284,28 @@ class MissionExecutor:
         self.goal = xyz
         self.pub_goal.publish(g)
 
+    def _pick_via_slot(self):
+        """W1 via_slots：本机越界槽位。全部机的 drop_y 名次 ↔ 槽位 y 升序
+        一一对应（全局确定性：各机本地对同一 Scene + 同一配置计算 → 同一
+        槽位集，无需跨机通信）。首次调用选定并缓存；选槽失败（旗开但几何
+        无解）返回 None，调用方回退共享越界点原行为。"""
+        if self._vs_slot is not None:
+            return self._vs_slot
+        keys = sorted((dp.xyz[1], dp.xyz[0]) for dp in self.scene.drop_points)
+        rank = keys.index((self.drop[1], self.drop[0]))
+        slots = select_via_slots(self.scene, self.scene.drone_count,
+                                 slot_clear=self._vs_clear, slot_sep=self._vs_sep,
+                                 z_lo=self.cruise_z - 0.5, z_hi=self.cruise_z + 0.5)
+        if slots is None or rank >= len(slots):
+            rospy.logwarn("mission_executor_node: drone %d via_slots 无可行槽位集，"
+                          "回退共享越界点", self.drone_id)
+            return None
+        slot = slots[rank]
+        self._vs_slot = slot
+        rospy.loginfo("mission_executor_node: drone %d VIA-SLOT (%.2f,%.2f) clr=%.2f",
+                      self.drone_id, slot[0], slot[1], slot[2])
+        return slot
+
     def _publish_phase(self, ph):
         self.pub_phase.publish(String(data=ph))
 
@@ -209,12 +335,22 @@ class MissionExecutor:
                 self.retry = 0
                 self.crossed_zone = False
                 self.pub_crossed.publish(Bool(data=False))
-                # 先飞向穿越区中心（编队协调层：加每机偏移展开成队形），进入后再转向投放点
-                cz = self.scene.crossing_zone_center
-                self._goto((cz[0], cz[1], self.cruise_z), formation=True)
-                self._pending = "CROSS_ZONE"
-                rospy.loginfo("drone %d heading to crossing zone (%.1f, %.1f)",
-                              self.drone_id, cz[0], cz[1])
+                # W1 via_slots：逐机散点槽位替代共享穿越区重心（默认关）。
+                # 槽位本身已散开承担编队展开职能，不再叠加 formation 偏移；
+                # 旗关或无可行槽位集时回退原共享点 + formation 偏移（逐位原行为）。
+                slot = self._pick_via_slot() if self._vs_enabled else None
+                if slot is not None:
+                    self._goto((slot[0], slot[1], self.cruise_z))
+                    self._pending = "CROSS_ZONE"
+                    rospy.loginfo("drone %d heading to via slot (%.1f, %.1f)",
+                                  self.drone_id, slot[0], slot[1])
+                else:
+                    # 先飞向穿越区中心（编队协调层：加每机偏移展开成队形），进入后再转向投放点
+                    cz = self.scene.crossing_zone_center
+                    self._goto((cz[0], cz[1], self.cruise_z), formation=True)
+                    self._pending = "CROSS_ZONE"
+                    rospy.loginfo("drone %d heading to crossing zone (%.1f, %.1f)",
+                                  self.drone_id, cz[0], cz[1])
             return
         if self.state == "RETURN_PENDING":
             if self.return_at is not None and rospy.get_time() >= self.return_at:
