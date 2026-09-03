@@ -51,13 +51,23 @@ for i in range(len(slots)):
 ok(all(slots[i][1] <= slots[i + 1][1] for i in range(len(slots) - 1)),
    "slots y-ascending")
 
-# V1b y 分带覆盖（编队前散开意图）：真值森林应每带一槽；兜底允许 1 带借空
+# V1m zone_margin 不变量（matrix_w1 教训回归）：每槽距带缘 >= zone_margin(1.0)
+# > drop_tol(0.8)，保证 executor CROSS_ZONE 腿"到槽⇒过带"，绊线永不误杀
+zxs = [p[0] for p in scene.crossing_zone]
 zys = [p[1] for p in scene.crossing_zone]
+for (sx, sy, _) in slots:
+    ok(min(zxs) + 1.0 <= sx <= max(zxs) - 1.0
+       and min(zys) + 1.0 <= sy <= max(zys) - 1.0,
+       "slot (%.2f,%.2f) >= zone_margin 1.0 inside zone (drop_tol ball "
+       "contained)" % (sx, sy))
+
+# V1b y 分带覆盖（编队前散开意图）：zone_margin 内缩收窄候选带后允许 2 带借空
+# （散开性由逐对 sep 保证；V1 已锁 6 槽全可行）
 band_h = (max(zys) - min(zys)) / scene.drone_count
 occ = len({min(int((sy - min(zys)) / band_h), scene.drone_count - 1)
            for (_, sy, _) in slots})
-ok(occ >= scene.drone_count - 1,
-   "band coverage %d/%d (front spread)" % (occ, scene.drone_count))
+ok(occ >= scene.drone_count - 2,
+   "band coverage %d/%d (front spread, margin-shrunk)" % (occ, scene.drone_count))
 
 # V2 热点树（穿越区重心最近树 = tree#24 (1.1,2.0)）：每槽对其净空 >= slot_clear
 cz = scene.crossing_zone_center

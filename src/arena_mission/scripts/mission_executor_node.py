@@ -58,11 +58,17 @@ def _slot_clearance(scene, x, y, z_lo, z_hi):
 
 
 def select_via_slots(scene, drone_count, slot_clear=1.5, slot_sep=2.5,
-                     cand_step=0.5, z_lo=2.0, z_hi=3.0):
+                     cand_step=0.5, z_lo=2.0, z_hi=3.0, zone_margin=1.0):
     """在穿越区内选 drone_count 个净空达标的散点槽位（纯几何，无 ROS）。
 
-    候选格按 cand_step 铺满穿越区，逐格过 in_crossing_zone + 表面净空
-    ≥ slot_clear 过滤（slot_clear 是安全地板永不降级）。y 向散开用结构化
+    候选格按 cand_step 铺满穿越区内缩区，逐格过 in_crossing_zone + 表面
+    净空 ≥ slot_clear 过滤（slot_clear 是安全地板永不降级）。zone_margin
+    把候选区先按带缘内缩：executor 的 CROSS_ZONE 腿有"到点未过带即
+    FAILED"绊线（原目标=带心，drop_tol 0.8m 球全含带内，理论不应发生）——
+    贴缘槽（如北缘内 0.5m）的 drop_tol 球戳出带外，护栏壳骑行的机在带外
+    进槽 0.8m 即被误杀（matrix_w1 实测 drone5 整机 0 分、D 臂 3/3 复现），
+    故槽心距带缘 ≥ zone_margin(1.0 > drop_tol 0.8) 恢复"到槽⇒过带"不变量。
+    y 向散开用结构化
     分带保证：zone 均分 drone_count 条横带、每带取净空最高且与已选互距
     ≥ slot_sep 的候选一槽（编队前散开意图由"每带一槽"结构性成立——
     逐对 |Δy|≥spread 的贪心装箱在 8m 走廊放 6 槽是刀锋 packing，selftest
@@ -79,8 +85,8 @@ def select_via_slots(scene, drone_count, slot_clear=1.5, slot_sep=2.5,
     ys = [p[1] for p in poly]
     # 回退梯子：slot_sep 逐档放宽，末档候选区整体内缩（slot_clear 永不降）
     for sep, inset in ((slot_sep, 0.0), (2.2, 0.0), (2.0, 0.0), (1.8, 0.3)):
-        x0, x1 = min(xs) + inset, max(xs) - inset
-        b0, b1 = min(ys) + inset, max(ys) - inset
+        x0, x1 = min(xs) + zone_margin + inset, max(xs) - zone_margin - inset
+        b0, b1 = min(ys) + zone_margin + inset, max(ys) - zone_margin - inset
         if x1 < x0 or b1 < b0:
             continue
         band_h = (b1 - b0) / drone_count
@@ -157,6 +163,7 @@ class MissionExecutor:
         self._vs_enabled = bool(vs.get("enabled", False))
         self._vs_clear = float(vs.get("slot_clear", 1.5))
         self._vs_sep = float(vs.get("slot_sep", 2.5))
+        self._vs_margin = float(vs.get("zone_margin", 1.0))
         self._vs_slot = None    # 本机槽位（EXECUTE 入场时选定并缓存；None=回退共享点）
 
         self.state = "IDLE"
@@ -295,7 +302,8 @@ class MissionExecutor:
         rank = keys.index((self.drop[1], self.drop[0]))
         slots = select_via_slots(self.scene, self.scene.drone_count,
                                  slot_clear=self._vs_clear, slot_sep=self._vs_sep,
-                                 z_lo=self.cruise_z - 0.5, z_hi=self.cruise_z + 0.5)
+                                 z_lo=self.cruise_z - 0.5, z_hi=self.cruise_z + 0.5,
+                                 zone_margin=self._vs_margin)
         if slots is None or rank >= len(slots):
             rospy.logwarn("mission_executor_node: drone %d via_slots 无可行槽位集，"
                           "回退共享越界点", self.drone_id)

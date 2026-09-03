@@ -75,6 +75,11 @@ mission:
                             # 降级；选不满自动回退共享点原行为。
     assign: drop_y          # assign=drop_y：drop_y 名次↔槽位 y 升序对号（各机本地
                             # 同参计算，无需跨机通信）。
+    zone_margin: 1.0        # 槽心距带缘最小深度（matrix_w1 教训）：executor 的
+                            # CROSS_ZONE 腿有"到点未过带即 FAILED"绊线（drop_tol
+                            # 0.8m 球须全含带内）——贴缘槽（北缘内 0.5m）球戳出带外，
+                            # 护栏壳骑行的机带外进槽即误杀（drone5 整机 0 分，D 臂
+                            # 3/3 复现）。zone_margin=1.0>0.8 恢复"到槽⇒过带"不变量。
 
 # ---- 闭环感知规划（去掉"上帝视角"） ------------------------------------------
 # enabled=true ：nav 只消费 lidar 点云，累积成全局持久占用图（SLAM），在带定位
