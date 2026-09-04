@@ -61,6 +61,7 @@ except ImportError:
 
 DRONES = 6
 CAP999 = 999.0
+LEG_ALARM = 90.0   # 单腿超阈告警（秒）；--leg-alarm 可调
 
 # /rosout 事件分类（顺序即优先级；全 ASCII，来源见各 node 源码）
 PATTERNS = [
@@ -114,8 +115,9 @@ class FleetState(object):
             "phase": "-", "x": None, "y": None, "v": None, "goal": None,
             "col": None, "stuck": None, "flips": None, "minclr": None,
             "clr": None, "crossed": False, "at_drop": False, "match": "-",
-            "score": None, "last_event": "-", "ev_col": 0, "ev_stall": 0,
-            "ev_de": 0, "ev_gs": 0, "ev_quiet": 0, "ev_retry": 0, "ev_fb": 0,
+            "score": None, "last_event": "-", "leg_t0": None, "leg_wall": None,
+            "ev_col": 0, "ev_stall": 0, "ev_de": 0, "ev_gs": 0,
+            "ev_quiet": 0, "ev_retry": 0, "ev_fb": 0,
         }
 
     def reset_run(self):
@@ -123,6 +125,13 @@ class FleetState(object):
             self.events.clear()
             self.drones = {i: self._fresh() for i in range(DRONES)}
             self.phase_timeout = False
+
+    def leg_touch(self, i, sim_t):
+        """P4 长尾观测：腿起点打点（腿事件/相位变化时调用）。"""
+        with self.lock:
+            d = self.drones[min(max(i, 0), DRONES - 1)]
+            d["leg_t0"] = sim_t
+            d["leg_wall"] = time.time()
 
 
 FS = FleetState()
@@ -155,6 +164,8 @@ def _mk_drone_cb(idx, key):
         d = FS.drones[idx]
         with FS.lock:
             if key == "phase":
+                if d["phase"] != m.data:   # 相位变化 = 新腿起点
+                    d["leg_t0"], d["leg_wall"] = FS.sim_t, time.time()
                 d["phase"] = m.data
             elif key == "crossed":
                 d["crossed"] = bool(m.data)
@@ -240,6 +251,9 @@ def on_rosout(m):
                 detail = "DONE"
             elif kind == "crossed":
                 detail = "crossed zone"
+            if kind in ("goto", "slot", "crossed", "at_pad", "drop",
+                        "FAILED", "done"):   # 腿级事件 = 新腿起点
+                d["leg_t0"], d["leg_wall"] = FS.sim_t, time.time()
             d["last_event"] = detail
             FS.events.append((FS.sim_t, time.strftime("%H:%M:%S"),
                               "d%d %s" % (i, detail)))
@@ -248,6 +262,17 @@ def on_rosout(m):
 
 def snapshot():
     with FS.lock:
+        ds = []
+        for i in range(DRONES):
+            d = dict(FS.drones[i])
+            if d["leg_t0"] is not None and FS.sim_t is not None \
+                    and FS.sim_t >= d["leg_t0"]:
+                d["leg_t"] = FS.sim_t - d["leg_t0"]
+            elif d["leg_wall"] is not None:
+                d["leg_t"] = time.time() - d["leg_wall"]
+            else:
+                d["leg_t"] = None
+            ds.append({"i": i, **d})
         return {
             "sim_t": FS.sim_t,
             "wall": time.strftime("%H:%M:%S"),
@@ -255,8 +280,7 @@ def snapshot():
             "ready": FS.ready,
             "phase_timeout": FS.phase_timeout,
             "score_summary": FS.score_summary,
-            "drones": [{"i": i, **{k: v for k, v in FS.drones[i].items()}}
-                       for i in range(DRONES)],
+            "drones": ds,
             "events": list(FS.events)[-10:],
         }
 
@@ -278,9 +302,12 @@ def render(s):
         pos = "(%6.1f,%6.1f)" % (d["x"], d["y"]) if d["x"] is not None else "(--,--)"
         goal = ("(%6.1f,%5.1f)" % d["goal"]) if d["goal"] else "(--)"
         v = "%.2f" % d["v"] if d["v"] is not None else "--"
-        cnt = ("col%d stall%d de%d gs%d q%d r%d fb%d" % (
-            d["ev_col"], d["ev_stall"], d["ev_de"], d["ev_gs"],
-            d["ev_quiet"], d["ev_retry"], d["ev_fb"]))
+        lt = "--" if d["leg_t"] is None else "%.0f" % d["leg_t"]
+        if d["leg_t"] is not None and d["leg_t"] > LEG_ALARM:
+            lt = "!" + lt          # P4 长尾告警：单腿超时（慢蹭看门狗测不到）
+        cnt = "legT %s | col%d stall%d de%d gs%d q%d r%d fb%d" % (
+            lt, d["ev_col"], d["ev_stall"], d["ev_de"], d["ev_gs"],
+            d["ev_quiet"], d["ev_retry"], d["ev_fb"])
         if d["score"] is not None:
             cnt = "score %s | %s" % (d["score"], cnt)
         lines.append("%-3d %-15s %-16s %-5s %-16s %-4s %-6s %-5s %-7s %s" % (
@@ -298,11 +325,15 @@ def render(s):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rate", type=float, default=1.0)
+    ap.add_argument("--leg-alarm", type=float, default=90.0,
+                    help="单腿超过该秒数在面板标 '!'（P4 长尾观测）")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--noline", action="store_true",
                     help="不清屏（tee 进文件时用）")
     ap.add_argument("--record", metavar="FILE", help="每帧追加 JSONL")
     args = ap.parse_args()
+    global LEG_ALARM
+    LEG_ALARM = args.leg_alarm
 
     # disable_rostime: 本工具不使用 rospy 时间（循环走墙钟，sim_t 取自 /clock
     # 载荷），跳过 use_sim_time 下等首个 /clock 的初始化窗口。
