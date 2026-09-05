@@ -1,5 +1,6 @@
 # GCS v0 profile — zx2026 仿真联合调试（单 ROS master :11411，一进程带 6 机）
 profile: sim
+mode: sim                     # 一级开关：sim=触发式启动（takeoff/back/land 阶段机自驱）
 server: 127.0.0.1:9870        # 地面站 hub 地址
 send_hz: 5.0
 ids: [0, 1, 2, 3, 4, 5]

@@ -1,5 +1,7 @@
 # GCS v0 profile — 真机 VIO（D435 + VINS-Fusion），每机一个 agent
 profile: real_vio
+mode: real                    # 一级开关：real=起飞先行+POWER/FC 门+危险命令 --yes
+                              # (hub 侧须加 --bat-min 30 才有 LOW_BAT 告警)
 server: 192.168.1.10:9870     # TODO 现场按地面站实际 IP 改
 send_hz: 5.0
 ids: [0]                      # 单 agent 带本机: 写 [DRONE_ID] 的值
@@ -32,3 +34,6 @@ ops:
     plan_dead_s: 5.0
     autonomy: plan                              # real: 规划流年龄
     pre_start_stages: ["P2_WAIT"]
+    bat_min: 30.0                               # POWER 门 + LOW_BAT 告警门限(%)
+    airborne_z: 0.5                             # 离地确认 z 门限(m)
+    airborne_timeout_s: 60.0                    # 起飞后离地确认超时

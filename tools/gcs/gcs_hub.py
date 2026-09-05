@@ -31,17 +31,21 @@ C_DIM, C_RED, C_YEL, C_GRN, C_RST = "\033[2m", "\033[31m", "\033[33m", \
 
 class Hub(object):
     def __init__(self, ids, link_lost_s, stall_vel, stall_s, plan_dead_s,
-                 logpath, view, status_path=None):
+                 logpath, view, status_path=None, bat_min=None,
+                 bat_low_s=5.0):
         self.ids = [str(i) for i in ids]
         self.link_lost_s = link_lost_s
         self.stall_vel = stall_vel
         self.stall_s = stall_s
         self.plan_dead_s = plan_dead_s
         self.view = view
+        self.bat_min = bat_min        # None=关（仿真无电量）；real 建议开
+        self.bat_low_s = bat_low_s
         self.lock = threading.Lock()
         self.st = {i: {"data": None, "rx_t": 0.0, "stall_t0": None,
                        "stall_on": False, "lost_on": True,
-                       "pdead_t0": None, "pdead_on": False}
+                       "pdead_t0": None, "pdead_on": False,
+                       "bat_t0": None, "bat_on": False}
                    for i in self.ids}
         self.conns = 0
         self.stage = None  # 全局阶段机（/zx2026/state，agent 上报）
@@ -101,6 +105,8 @@ class Hub(object):
                     if d is None or st["lost_on"]:
                         st["stall_t0"] = st["pdead_t0"] = None
                         st["stall_on"] = st["pdead_on"] = False
+                        st["bat_t0"] = None
+                        st["bat_on"] = False
                         continue
                     phase = d.get("phase")
                     active = phase in ACTIVE_PHASES
@@ -142,6 +148,25 @@ class Hub(object):
                                        "plan_age=%.1fs" % plan_age)
                         st["pdead_t0"] = None
                         st["pdead_on"] = False
+                    # LOW BAT（real 模式；sim 电量 null 自动跳过）：
+                    # 持续低于门限才触发（瞬时压降不误报），恢复成对
+                    bat = d.get("bat")
+                    if self.bat_min is not None and bat is not None \
+                            and bat < self.bat_min:
+                        if st["bat_t0"] is None:
+                            st["bat_t0"] = now
+                        elif now - st["bat_t0"] > self.bat_low_s and \
+                                not st["bat_on"]:
+                            st["bat_on"] = True
+                            self.event(did, "LOW_BAT",
+                                       "bat=%.0f%% < %.0f%%"
+                                       % (bat, self.bat_min))
+                    else:
+                        if st["bat_on"]:
+                            self.event(did, "BAT_OK", "bat=%.0f%%"
+                                       % (bat if bat is not None else -1))
+                        st["bat_t0"] = None
+                        st["bat_on"] = False
             time.sleep(1.0)
 
     # ---- 状态快照文件（1Hz 原子写，ops/第 3 步面板的数据源） ---------------
@@ -166,7 +191,7 @@ class Hub(object):
                         "fc": d.get("fc") if d else None,
                         "connected": d.get("connected") if d else None,
                         "lost_on": st["lost_on"], "stall_on": st["stall_on"],
-                        "pdead_on": st["pdead_on"],
+                        "pdead_on": st["pdead_on"], "bat_on": st["bat_on"],
                     }
                 evs = list(self.events)[-50:]
             snap["events"] = evs
@@ -216,6 +241,8 @@ class Hub(object):
                     elif st["pdead_on"]:
                         col, _ = C_YEL, alarms.append(
                             "d%s PLANNER_DEAD" % did)
+                    if st["bat_on"]:
+                        alarms.append("d%s LOW_BAT" % did)
                     lines.append(" d%-2s %s|%-8s|bat %-4s|%-9s pos %-16s "
                                  "v %-5s plan %-6s%s"
                                  % (did, col, ph[:8], bat, "LINK",
@@ -263,13 +290,17 @@ def main():
     ap.add_argument("--logdir", default="/home/ubuntu/zx2026_arena_ws/run_logs")
     ap.add_argument("--status-file", default=None,
                     help="1Hz 快照 JSON（默认 <logdir>/gcs_status.json）")
+    ap.add_argument("--bat-min", type=float, default=None,
+                    help="LOW_BAT 门限（%%，缺省=关；真机建议 30）")
+    ap.add_argument("--bat-low-s", type=float, default=5.0)
     args = ap.parse_args()
     logpath = "%s/gcs_telem_%s.jsonl" % (args.logdir,
                                          time.strftime("%Y%m%d_%H%M%S"))
     status_path = args.status_file or "%s/gcs_status.json" % args.logdir
     hub = Hub(args.ids.split(","), args.link_lost, args.stall_vel,
               args.stall_s, args.plan_dead, logpath, args.view,
-              status_path=status_path)
+              status_path=status_path, bat_min=args.bat_min,
+              bat_low_s=args.bat_low_s)
     srv = socketserver.ThreadingTCPServer(("0.0.0.0", args.port), Handler)
     srv.hub = hub
     srv.allow_reuse_address = True

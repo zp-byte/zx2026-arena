@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""gcs_ops.py — 非凸α 地面站操作编排器（GCS v0 第 2 步）。
+"""gcs_ops.py — 非凸α 地面站操作编排器（GCS v0 第 2 步，mode 感知）。
 
-四段健康门（全部从 hub 状态快照文件判据，本进程不进 ROS 图——铁律①延伸）：
-  PREFLIGHT   全部 agent 遥测新鲜（age < link_lost_s）
-  POSITIONING 全部机 odom 有限值 且 静止（|v| < max_vel）
-  AUTONOMY    自主栈活着（sim: 相位流在发；real: 规划流 plan_age 新鲜）
-  READY       三门全绿 + 阶段机处于起飞前状态（P2_WAIT）→ 允许 TRIGGER
+健康门（全部从 hub 状态快照判据，本进程不进 ROS 图——铁律①延伸）：
+  sim  模式（mode: sim，默认）：
+    PREFLIGHT   全部 agent 遥测新鲜（age < link_lost_s）
+    POSITIONING 全部机 odom 有限值 且 静止（|v| < max_vel）
+    AUTONOMY    自主栈活着（sim: 相位流在发；real: 规划流 plan_age 新鲜）
+    READY       前序门全绿 + 阶段机处于起飞前状态（P2_WAIT）→ 允许 TRIGGER
+  real 模式（mode: real）在 POSITIONING 与 AUTONOMY 之间加两门：
+    POWER       全部机 bat >= bat_min（电量门，real 缺省 30%）
+    FC          全部机 mavros connected（FC 门）
+
+mode: real 的附加保护：
+  start 流程 = 四门绿 → 逐机错峰 takeoff → 离地确认(z >= airborne_z)
+              → trigger（模板为 null 则跳过=任务自启）→ 盯飞
+  start/takeoff/back/land 必须显式 --yes（面板两段确认后代为传参）；
+  panic 豁免——急停链路永不设确认障碍。
 
 命令层（模板全在 profile，仿真=rosservice，真机=ssh，本文件不含一处地址）：
   status / preflight / start(TRIGGER) / takeoff / back / land / panic
@@ -29,6 +39,8 @@ import yaml
 C_DIM, C_RED, C_YEL, C_GRN, C_RST = "\033[2m", "\033[31m", "\033[33m", \
     "\033[32m", "\033[0m"
 STAGES = ["PREFLIGHT", "POSITIONING", "AUTONOMY", "READY"]
+STAGES_REAL = ["PREFLIGHT", "POSITIONING", "POWER", "FC", "AUTONOMY",
+               "READY"]
 
 
 class Ops(object):
@@ -48,6 +60,15 @@ class Ops(object):
         self.plan_dead_s = float(g.get("plan_dead_s", 5.0))
         self.autonomy_mode = g.get("autonomy", "mission")
         self.pre_start_stages = g.get("pre_start_stages", ["P2_WAIT"])
+        # mode 一级开关：sim（默认）/ real —— real 加 POWER/FC 门、
+        # start 起飞先行、危险命令 --yes
+        self.mode = str(self.cfg.get("mode", "sim")).lower()
+        self.stages = list(STAGES_REAL if self.mode == "real" else STAGES)
+        self.bat_min = g.get("bat_min")
+        if self.mode == "real" and self.bat_min is None:
+            self.bat_min = 30.0  # real 缺省电量门（POWER）
+        self.airborne_z = float(g.get("airborne_z", 0.5))
+        self.airborne_timeout_s = float(g.get("airborne_timeout_s", 60.0))
         self.execute_timeout_s = float(ops.get("execute_timeout_s", 300.0))
         self.terminal_phases = set(ops.get("terminal_phases",
                                            ["DONE", "FAILED"]))
@@ -95,6 +116,21 @@ class Ops(object):
                 bad.append("%s v=%.2f" % (i, v if v is not None else -1))
         res["POSITIONING"] = (not bad, "settled" if not bad
                               else "; ".join(bad[:3]))
+        # POWER：电量门（仅 real；sim 电量 null 无此门）
+        if self.mode == "real":
+            bad = []
+            for i in self.ids:
+                bat = (drones.get(i) or {}).get("bat")
+                if bat is None or bat < self.bat_min:
+                    bad.append("%s bat=%s" % (i, "--" if bat is None
+                                              else "%.0f%%" % bat))
+            res["POWER"] = (not bad, "ok" if not bad
+                            else "; ".join(bad[:3]))
+            # FC：mavros 连接门（仅 real）
+            bad = [i for i in self.ids
+                   if (drones.get(i) or {}).get("connected") is not True]
+            res["FC"] = (not bad, "mavros ok" if not bad
+                         else "fc not connected: %s" % ",".join(bad))
         # AUTONOMY：自主栈活着
         bad = []
         for i in self.ids:
@@ -108,9 +144,9 @@ class Ops(object):
                     bad.append("%s phase?" % i)
         res["AUTONOMY"] = (not bad, "alive(%s)" % self.autonomy_mode
                            if not bad else "; ".join(bad[:3]))
-        # READY：三门全绿 + 起飞前阶段
-        ok3 = all(res[s][0] for s in STAGES[:3])
-        if not ok3:
+        # READY：前序门全绿 + 起飞前阶段
+        okpre = all(res[s][0] for s in self.stages[:-1])
+        if not okpre:
             res["READY"] = (False, "gates above")
         elif self.stage_topic is None:
             res["READY"] = (True, "stage topic n/a (TODO 真机)")
@@ -119,7 +155,7 @@ class Ops(object):
         else:
             res["READY"] = (False, "stage=%s not in %s"
                             % (stage, self.pre_start_stages))
-        cur = next((s for s in STAGES if not res[s][0]), "READY")
+        cur = next((s for s in self.stages if not res[s][0]), "READY")
         return res, cur
 
     def print_table(self, snap, res, cur):
@@ -142,7 +178,7 @@ class Ops(object):
                      "%.2f" % v if v is not None else "--",
                      "%.1f" % pa if pa is not None and pa >= 0 else "never",
                      C_RST))
-        for s in STAGES:
+        for s in self.stages:
             ok, why = res[s]
             mark = C_GRN + "[OK]" + C_RST if ok else C_YEL + "[--]" + C_RST
             print(" GATE %-11s %s %s" % (s, mark, why))
@@ -217,6 +253,37 @@ class Ops(object):
             all_ok = all_ok and ok
         return all_ok
 
+    # ---- 离地确认（real 起飞先行流程）---------------------------------------
+    def wait_airborne(self):
+        """全部机 z >= airborne_z 才算离地；超时=失败（宁可不起飞）。"""
+        print(" airborne confirm: z >= %.1fm, timeout %.0fs"
+              % (self.airborne_z, self.airborne_timeout_s))
+        t0 = time.time()
+        while True:
+            snap = self.read_status()
+            drones = (snap or {}).get("drones", {})
+
+            def z_of(i):
+                p = (drones.get(i) or {}).get("pos")
+                if p and len(p) > 2 and all(math.isfinite(c) for c in p):
+                    return p[2]
+                return None
+            up = [i for i in self.ids
+                  if (z_of(i) or -1e9) >= self.airborne_z]
+            ph = " ".join("%s:%s" % (i, "%.1f" % z_of(i)
+                                     if z_of(i) is not None else "--")
+                          for i in self.ids)
+            print("  [%3.0fs] z %s (%d/%d up)"
+                  % (time.time() - t0, ph, len(up), len(self.ids)))
+            if len(up) == len(self.ids):
+                print(" AIRBORNE — all %d drones up." % len(self.ids))
+                self.log("AIRBORNE_OK")
+                return True
+            if time.time() - t0 > self.airborne_timeout_s:
+                self.log("AIRBORNE_TIMEOUT", up=up)
+                return False
+            time.sleep(1.0)
+
     # ---- start = TRIGGER + 盯飞 --------------------------------------------
     def start(self, force, monitor_timeout):
         snap = self.read_status()
@@ -225,8 +292,24 @@ class Ops(object):
         if cur != "READY" and not force:
             print(" NOT READY (%s) — preflight first, or --force." % cur)
             return 1
-        self.log("START", force=force)
-        if not self.dispatch("trigger"):
+        self.log("START", force=force, mode=self.mode)
+        if self.mode == "real":
+            # 真机：起飞先行 → 离地确认 → 再触发任务（sim 直接 trigger）
+            print(" REAL MODE: staggered takeoff first.")
+            if not self.dispatch("takeoff"):
+                print(" takeoff dispatch failed — abort before trigger.")
+                self.log("TAKEOFF_FAIL")
+                return 1
+            if not self.wait_airborne():
+                print(" airborne confirm FAILED — mission NOT triggered.")
+                self.log("AIRBORNE_FAIL")
+                return 1
+        if self.cmds.get("trigger") is None:
+            # 真机 profile trigger 待补/任务自启：跳过触发，直接盯飞
+            print(" trigger not configured — assume auto-start after "
+                  "takeoff.")
+            self.log("TRIGGER_SKIP")
+        elif not self.dispatch("trigger"):
             print(" trigger failed — mission NOT started.")
             self.log("TRIGGER_FAIL")
             return 1
@@ -295,10 +378,20 @@ def main():
                              "back", "land", "panic"])
     ap.add_argument("--ids", default=None, help="逗号分隔，缺省=全队")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--yes", action="store_true",
+                    help="real 模式危险命令确认（面板两段确认后代传）")
     ap.add_argument("--preflight-timeout", type=float, default=90.0)
     ap.add_argument("--monitor-timeout", type=float, default=None)
     args = ap.parse_args()
     ops = Ops(args.profile)
+    # real 模式保护：危险命令必须 --yes；panic 豁免（急停不设障碍）
+    REAL_DANGER = {"start", "takeoff", "back", "land"}
+    if ops.mode == "real":
+        print("== REAL MODE (真机) profile=%s ==" % args.profile)
+        if args.action in REAL_DANGER and not args.yes:
+            print(" REFUSED: real 模式 `%s` 必须显式 --yes "
+                  "(CLI 直发；面板走两段确认后代传 --yes)" % args.action)
+            raise SystemExit(2)
     if args.action == "panic":
         # land-all：逐机必达（模板带 {id} 时单机失败不中止）
         ids = args.ids.split(",") if args.ids else ops.ids

@@ -7,10 +7,12 @@
 工作线程执行，stdout 经 Qt 信号流进日志窗，UI 不阻塞。
 
 布局：
+  头幅   SIM 仿真模式(蓝) / REAL 真机模式(红)——mode 一级开关的 UI 锚
   顶栏   阶段机 | 连接数 | 快照年龄
-  门条   PREFLIGHT / POSITIONING / AUTONOMY / READY 四灯
+  门条   sim 四灯 / real 六灯(加 POWER+FC)，随 profile 动态
   六格   每机卡片: 相位/位置/速度/电量/规划年龄/链路年龄 + 告警徽章
   按钮排 START / TAKEOFF / BACK / LAND + PANIC(双击确认, 5s 解除)
+         空模板按钮禁用置灰（不可达命令不给点）；real 全按钮两段确认
   日志窗 事件流 + 命令输出
 
 用法：
@@ -48,6 +50,10 @@ def qss():
     QPushButton#panic  { background: %s; color: white; font-weight: bold;
                          font-size: 16px; border: 2px solid #ff6b6b; }
     QPushButton#panicArmed { background: #ff1f1f; color: white; }
+    QLabel#modeSim  { background: #1f4e79; color: white; font-weight: bold;
+                      font-size: 15px; border-radius: 6px; }
+    QLabel#modeReal { background: #8e1f1f; color: white; font-weight: bold;
+                      font-size: 15px; border-radius: 6px; }
     QPlainTextEdit { background: #0d1013; color: #9fd49f;
                      font-family: Monospace; font-size: 12px; }
     """ % (PANEL_BG, TXT, DIM, CARD_BG, DIM, TXT, RED)
@@ -103,7 +109,7 @@ class Card(QFrame):
             v.addWidget(w)
         self.did = did
 
-    def set_state(self, d, link_ok, stall_on, pdead_on):
+    def set_state(self, d, link_ok, stall_on, pdead_on, bat_on=False):
         # 数据过期=NO LINK（与 hub dash 同语义：不信 TCP/旧数据）
         ph = (d or {}).get("phase") if link_ok else None
         self.phase.setText(str(ph) if ph else "NO LINK")
@@ -130,6 +136,8 @@ class Card(QFrame):
             badges.append("STALL")
         if pdead_on:
             badges.append("PLANNER")
+        if bat_on:
+            badges.append("BAT")
         self.alarm.setText(" ".join("[%-7s]" % b for b in badges))
         self.alarm.setStyleSheet("color: %s;" % (RED if badges else DIM))
         border = RED if not link_ok else (YEL if badges else GRN)
@@ -146,13 +154,28 @@ class Panel(QMainWindow):
         self.busy = False
         self._fired = False  # selftest 自动 START 只发一次（实例级）
         self.panic_armed_t = 0.0
+        self.armed = None    # real 两段确认：当前 armed 的命令名
+        self.armed_t = 0.0
         self.evt_seen = set()
-        self.setWindowTitle("fei tu A GCS  %s" % ops.cfg.get("profile", "?"))
+        self.real = (getattr(ops, "mode", "sim") == "real")
+        self.setWindowTitle("fei tu A GCS [%s]  %s"
+                            % ("REAL" if self.real else "SIM",
+                               ops.cfg.get("profile", "?")))
         self.resize(980, 720)
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+
+        # 模式头幅（红=真机 / 蓝=仿真）——mode 一级开关的 UI 锚
+        self.mode_lbl = QLabel(
+            "REAL 真机模式 — 起飞先行 + 两段确认 + 低电告警"
+            if self.real else
+            "SIM 仿真模式 — 触发式启动（TAKEOFF/BACK/LAND 由阶段机自驱）")
+        self.mode_lbl.setAlignment(Qt.AlignCenter)
+        self.mode_lbl.setFixedHeight(28)
+        self.mode_lbl.setObjectName("modeReal" if self.real else "modeSim")
+        root.addWidget(self.mode_lbl)
 
         # 顶栏
         top = QHBoxLayout()
@@ -166,10 +189,10 @@ class Panel(QMainWindow):
         top.addWidget(self.snap_lbl)
         root.addLayout(top)
 
-        # 四段门条
+        # 门条（sim 四灯 / real 六灯，随 profile 动态）
         gates_box = QHBoxLayout()
         self.gate_lbls = {}
-        for s in STAGES:
+        for s in ops.stages:
             lbl = QLabel(s)
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setFixedWidth(180)
@@ -186,9 +209,11 @@ class Panel(QMainWindow):
             grid.addWidget(c, i // 3, i % 3)
         root.addLayout(grid)
 
-        # 指令按钮排
+        # 指令按钮排（空模板=禁用置灰：不可达命令不给点）
         btns = QHBoxLayout()
         self.btns = {}
+        self.btn_text = {}
+        self.btn_avail = {}
         for name, text in (("trigger", "START"),
                            ("takeoff", "TAKEOFF"),
                            ("back", "BACK"),
@@ -196,10 +221,20 @@ class Panel(QMainWindow):
             b = QPushButton(text)
             b.clicked.connect(lambda _=False, n=name: self.on_cmd(n))
             self.btns[name] = b
+            self.btn_text[name] = text
+            self.btn_avail[name] = ops.cmds.get(name) is not None
+            if not self.btn_avail[name]:
+                b.setEnabled(False)
+                b.setToolTip("profile 未配置 ops.cmds.%s — 不可达，禁用"
+                             % name)
             btns.addWidget(b)
         self.panic = QPushButton("PANIC LAND")
         self.panic.setObjectName("panic")
         self.panic.clicked.connect(self.on_panic)
+        if ops.cmds.get("panic") is None and \
+                ops.cmds.get("land") is None:
+            self.panic.setEnabled(False)
+            self.panic.setToolTip("profile 未配置 panic/land — 禁用")
         btns.addWidget(self.panic)
         root.addLayout(btns)
 
@@ -223,7 +258,7 @@ class Panel(QMainWindow):
         self.log.appendPlainText(s)
 
     def _set_gates(self, res):
-        for s in STAGES:
+        for s in self.ops.stages:
             ok, why = res[s]
             lbl = self.gate_lbls[s]
             lbl.setText("%s\n%s" % (s, "OK" if ok else why[:18]))
@@ -232,8 +267,8 @@ class Panel(QMainWindow):
                               "padding: 4px; color: %s;" % (color, color))
 
     def _set_buttons(self, enabled):
-        for b in self.btns.values():
-            b.setEnabled(enabled)
+        for name, b in self.btns.items():
+            b.setEnabled(enabled and self.btn_avail.get(name, False))
         if enabled:
             self._disarm_panic()
 
@@ -255,7 +290,8 @@ class Panel(QMainWindow):
             link_ok = age is not None and age <= self.ops.link_lost_s
             card.set_state(d, link_ok,
                            bool((d or {}).get("stall_on")),
-                           bool((d or {}).get("pdead_on")))
+                           bool((d or {}).get("pdead_on")),
+                           bool((d or {}).get("bat_on")))
         res, _cur = self.ops.gates(snap)
         self._set_gates(res)
         # 事件流增量（去重：hub events 尾 50 条）
@@ -308,8 +344,69 @@ class Panel(QMainWindow):
         self.w.start()
         self.append("[CMD] %s dispatched" % name)
 
+    # ---- real 两段确认 ------------------------------------------------------
     def on_cmd(self, name):
-        self.start_cmd(name)
+        if not self.real:
+            self.start_cmd(name)
+            return
+        # REAL 模式：全部命令两段确认（arm 5s 内二次点击 → 弹窗确认）
+        now = time.time()
+        if self.armed != name or now - self.armed_t > 5.0:
+            self._arm(name)
+            return
+        self._disarm()
+        if QMessageBox.question(
+                self, "REAL CONFIRM",
+                "真机模式确认执行 %s？" % self.btn_text[name]) != \
+                QMessageBox.Yes:
+            self.append("[REAL] %s cancelled" % name)
+            return
+        if name == "trigger":
+            self.start_flow()  # real START = 完整起飞先行流程
+        else:
+            self.start_cmd(name)
+
+    def _arm(self, name):
+        self.armed = name
+        self.armed_t = time.time()
+        b = self.btns[name]
+        b.setText("CONFIRM %s ?" % self.btn_text[name])
+        b.setStyleSheet("background: %s; color: white; font-weight: bold;"
+                        % YEL)
+        self.append("[REAL] %s armed — 5s 内再次点击确认" % name)
+        QTimer.singleShot(5000, lambda: self._disarm(name))
+
+    def _disarm(self, token=None):
+        if token is not None and token != self.armed:
+            return  # 已换新 arm，别误清新状态
+        if self.armed is None:
+            return
+        b = self.btns.get(self.armed)
+        if b is not None:
+            b.setText(self.btn_text[self.armed])
+            b.setStyleSheet("")
+        self.armed = None
+        self.armed_t = 0.0
+
+    def start_flow(self):
+        """real START = ops.start 全流程（门→错峰起飞→离地确认→触发→盯飞）。"""
+        if self.busy:
+            return
+        self.busy = True
+        self._set_buttons(False)
+        ops = self.ops
+        mt = ops.execute_timeout_s + 60.0
+
+        def fn():
+            import contextlib
+            with contextlib.redirect_stdout(self.stream):
+                return ops.start(False, mt)
+
+        self.w = Worker(fn)
+        self.w.done.connect(self.on_cmd_done)
+        self.w.start()
+        self.append("[START] real flow: gates->takeoff->airborne->trigger"
+                    "->monitor")
 
     def on_cmd_done(self, ok, _msg):
         self.busy = False
