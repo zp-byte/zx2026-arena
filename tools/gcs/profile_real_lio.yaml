@@ -1,0 +1,13 @@
+# GCS v0 profile — 真机 LIO（MID360 + faster_lio），每机一个 agent
+# 部署: 拷到机载 ~/Diff-Planner/tools/ 下, server 填地面站笔记本 IP
+profile: real_lio
+server: 192.168.1.10:9870     # TODO 现场按地面站实际 IP 改
+send_hz: 5.0
+ids: [0]                      # 单 agent 带本机: 写 [DRONE_ID] 的值
+topics:
+  odom: /Odometry             # faster_lio 输出（twist 恒零时 agent 自动位置差分）
+  phase: null                 # TODO 实机确认 multipoint 状态机话题名后填
+  battery: /mavros/battery    # sensor_msgs/BatteryState
+  fc: /mavros/state           # mavros_msgs/State (connected/mode)
+  liveness:                                     # TODO 实机确认话题名
+    - /drone_{id}_planning/trajectory

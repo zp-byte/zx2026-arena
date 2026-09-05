@@ -1,0 +1,12 @@
+# GCS v0 profile — 真机 VIO（D435 + VINS-Fusion），每机一个 agent
+profile: real_vio
+server: 192.168.1.10:9870     # TODO 现场按地面站实际 IP 改
+send_hz: 5.0
+ids: [0]                      # 单 agent 带本机: 写 [DRONE_ID] 的值
+topics:
+  odom: /vins/imu_propagate   # VINS 里程计输出
+  phase: null                 # TODO 实机确认 multipoint 状态机话题名后填
+  battery: /mavros/battery
+  fc: /mavros/state
+  liveness:                                     # TODO 实机确认话题名
+    - /drone_{id}_planning/trajectory

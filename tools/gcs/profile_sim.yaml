@@ -1,0 +1,12 @@
+# GCS v0 profile — zx2026 仿真联合调试（单 ROS master :11411，一进程带 6 机）
+profile: sim
+server: 127.0.0.1:9870        # 地面站 hub 地址
+send_hz: 5.0
+ids: [0, 1, 2, 3, 4, 5]
+topics:
+  odom: /drone_{id}/odom                        # nav_msgs/Odometry
+  phase: /drone_{id}/mission/phase              # std_msgs/String
+  battery: null                                 # 仿真无电量
+  fc: null
+  liveness:                                     # 规划活性（path 流年龄）
+    - /drone_{id}/path
