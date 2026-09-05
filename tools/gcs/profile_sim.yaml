@@ -8,5 +8,30 @@ topics:
   phase: /drone_{id}/mission/phase              # std_msgs/String
   battery: null                                 # 仿真无电量
   fc: null
-  liveness:                                     # 规划活性（path 流年龄）
-    - /drone_{id}/path
+  liveness:                                     # 规划活性（nav 闭环 20Hz 恒发，
+    - /drone_{id}/vel_cmd                       #  死即断；/path 重规划才发=假死误报）
+  stage: /zx2026/state                          # 全局阶段机（P1..P5/DONE）
+
+# GCS v0 第 2 步：操作编排（gcs_ops.py）——命令模板与门限全配置化
+ops:
+  status_file: /home/ubuntu/zx2026_arena_ws/run_logs/gcs_status.json
+  shell_prefix: >-
+    source /opt/ros/noetic/setup.bash &&
+    source /home/ubuntu/zx2026_arena_ws/devel/setup.bash &&
+    export ROS_MASTER_URI=http://127.0.0.1:11411 &&
+    export ROS_HOSTNAME=127.0.0.1 &&
+  cmds:
+    trigger: rosservice call /zx2026/start      # P2_WAIT -> P3_TAKEOFF
+    takeoff: null                               # 仿真由 stage_controller 驱动
+    back: null
+    land: null
+    panic: null    # 仿真无外部中止通道（executor 无 abort 输入）——第 3 步立案
+  stagger_s: 2.0                                # 错峰起飞间隔
+  retries: 2
+  execute_timeout_s: 300.0
+  gates:
+    link_lost_s: 3.0
+    max_vel: 0.10                               # POSITIONING 静止门限
+    plan_dead_s: 5.0
+    autonomy: mission                           # sim: 相位流; real: plan 流
+    pre_start_stages: ["P1_INIT", "P2_WAIT"]

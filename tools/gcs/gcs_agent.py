@@ -35,6 +35,7 @@ class Agent(object):
         self.state = {i: self._blank() for i in self.ids}
         self.seq = 0
         self.tp = cfg["topics"]
+        self.stage = None  # 全局阶段机（/zx2026/state），非 per-drone
 
     @staticmethod
     def _blank():
@@ -67,6 +68,9 @@ class Agent(object):
             for k, lt in enumerate(live):
                 rospy.Subscriber(lt.format(id=i), rospy.AnyMsg,
                                  self._on_live, (i, k), queue_size=1)
+        stp = self.tp.get("stage")
+        if stp:
+            rospy.Subscriber(stp, String, self._on_stage, queue_size=2)
 
     def _on_odom(self, msg, i):
         p = msg.pose.pose.position
@@ -109,6 +113,10 @@ class Agent(object):
             st = self.state[i]
             st["fc"] = str(msg.mode)
             st["connected"] = bool(msg.connected)
+
+    def _on_stage(self, msg):
+        with self.lock:
+            self.stage = str(msg.data)
 
     def _on_live(self, _msg, key):
         i, _k = key
@@ -154,7 +162,8 @@ class Agent(object):
                     "phase": st["phase"], "ts": lt.get("odom", 0.0),
                     "plan_age": (now - lt["plan"]) if "plan" in lt else -1.0,
                 }
-        return {"agent_ts": now, "seq": self.seq, "drones": drones}
+        return {"agent_ts": now, "seq": self.seq, "stage": self.stage,
+                "drones": drones}
 
 
 def main():

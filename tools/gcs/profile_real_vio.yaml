@@ -10,3 +10,25 @@ topics:
   fc: /mavros/state
   liveness:                                     # TODO 实机确认话题名
     - /drone_{id}_planning/trajectory
+  stage: null                  # TODO 比赛阶段机话题确认后填（无则 READY 门跳过 stage 检查）
+
+# GCS v0 第 2 步：操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
+# 坐标纪律：模板含 {id}=逐机错峰+重试；不含=全局一次。IP/脚本路径待实飞勘误。
+ops:
+  status_file: /home/ubuntu/zx2026_arena_ws/run_logs/gcs_status.json
+  shell_prefix: ""
+  cmds:   # TODO 实飞前逐条核实: 机 IP 网段、登录方式、ops 脚本绝对路径
+    trigger: null   # TODO 比赛触发形式（裁判系统/手动 pub_trigger）确认后填
+    takeoff: "ssh nv@192.168.1.10{id} 'bash ~/Diff-planner/ops/takeoff.sh'"
+    back: "ssh nv@192.168.1.10{id} 'bash ~/Diff-planner/ops/back.sh'"
+    land: "ssh nv@192.168.1.10{id} 'bash ~/Diff-planner/ops/land.sh'"
+    panic: "ssh nv@192.168.1.10{id} 'bash ~/Diff-planner/ops/land.sh'"
+  stagger_s: 2.0
+  retries: 2
+  execute_timeout_s: 600.0
+  gates:
+    link_lost_s: 3.0
+    max_vel: 0.10
+    plan_dead_s: 5.0
+    autonomy: plan                              # real: 规划流年龄
+    pre_start_stages: ["P2_WAIT"]

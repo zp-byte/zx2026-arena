@@ -31,7 +31,7 @@ C_DIM, C_RED, C_YEL, C_GRN, C_RST = "\033[2m", "\033[31m", "\033[33m", \
 
 class Hub(object):
     def __init__(self, ids, link_lost_s, stall_vel, stall_s, plan_dead_s,
-                 logpath, view):
+                 logpath, view, status_path=None):
         self.ids = [str(i) for i in ids]
         self.link_lost_s = link_lost_s
         self.stall_vel = stall_vel
@@ -44,9 +44,11 @@ class Hub(object):
                        "pdead_t0": None, "pdead_on": False}
                    for i in self.ids}
         self.conns = 0
+        self.stage = None  # 全局阶段机（/zx2026/state，agent 上报）
         self.events = deque(maxlen=400)
         self.logf = open(logpath, "a", encoding="utf-8")
         self.logpath = logpath
+        self.status_path = status_path
 
     # ---- 事件与日志 --------------------------------------------------------
     def event(self, did, kind, detail):
@@ -64,6 +66,8 @@ class Hub(object):
         now = time.time()
         recs = []
         with self.lock:
+            if obj.get("stage") is not None:
+                self.stage = obj["stage"]
             for did, d in obj.get("drones", {}).items():
                 if did not in self.st:
                     continue
@@ -138,6 +142,42 @@ class Hub(object):
                                        "plan_age=%.1fs" % plan_age)
                         st["pdead_t0"] = None
                         st["pdead_on"] = False
+            time.sleep(1.0)
+
+    # ---- 状态快照文件（1Hz 原子写，ops/第 3 步面板的数据源） ---------------
+    # 地面站编排进程不进 ROS 图——从 hub 快照文件读遥测，铁律 ① 的延伸。
+    def status_writer(self):
+        while True:
+            now = time.time()
+            snap = {"hub_ts": round(now, 3), "stage": self.stage,
+                    "conns": self.conns, "drones": {}}
+            with self.lock:
+                for did in self.ids:
+                    st = self.st[did]
+                    d = st["data"]
+                    age = now - st["rx_t"] if st["rx_t"] else None
+                    snap["drones"][did] = {
+                        "age": round(age, 2) if age is not None else None,
+                        "phase": d.get("phase") if d else None,
+                        "pos": d.get("pos") if d else None,
+                        "speed": d.get("speed") if d else None,
+                        "plan_age": d.get("plan_age") if d else None,
+                        "bat": d.get("bat") if d else None,
+                        "fc": d.get("fc") if d else None,
+                        "connected": d.get("connected") if d else None,
+                        "lost_on": st["lost_on"], "stall_on": st["stall_on"],
+                        "pdead_on": st["pdead_on"],
+                    }
+                evs = list(self.events)[-50:]
+            snap["events"] = evs
+            try:
+                tmp = self.status_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(snap, f, ensure_ascii=False)
+                import os
+                os.replace(tmp, self.status_path)
+            except Exception:
+                pass
             time.sleep(1.0)
 
     # ---- ANSI 六格仪表（2Hz）----------------------------------------------
@@ -221,18 +261,23 @@ def main():
     ap.add_argument("--stall-s", type=float, default=5.0)
     ap.add_argument("--plan-dead", type=float, default=5.0)
     ap.add_argument("--logdir", default="/home/ubuntu/zx2026_arena_ws/run_logs")
+    ap.add_argument("--status-file", default=None,
+                    help="1Hz 快照 JSON（默认 <logdir>/gcs_status.json）")
     args = ap.parse_args()
     logpath = "%s/gcs_telem_%s.jsonl" % (args.logdir,
                                          time.strftime("%Y%m%d_%H%M%S"))
+    status_path = args.status_file or "%s/gcs_status.json" % args.logdir
     hub = Hub(args.ids.split(","), args.link_lost, args.stall_vel,
-              args.stall_s, args.plan_dead, logpath, args.view)
+              args.stall_s, args.plan_dead, logpath, args.view,
+              status_path=status_path)
     srv = socketserver.ThreadingTCPServer(("0.0.0.0", args.port), Handler)
     srv.hub = hub
     srv.allow_reuse_address = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     threading.Thread(target=hub.watchdog, daemon=True).start()
-    print("[hub] up port=%d ids=%s log=%s" % (args.port, args.ids, logpath),
-          flush=True)
+    threading.Thread(target=hub.status_writer, daemon=True).start()
+    print("[hub] up port=%d ids=%s log=%s status=%s"
+          % (args.port, args.ids, logpath, status_path), flush=True)
     if args.view == "dash":
         print("\033[2J", end="", flush=True)
         hub.dash()
