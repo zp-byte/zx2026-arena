@@ -78,6 +78,15 @@ class NavNode:
         self._cg_min_target = float(cg.get("min_target", 0.75))
         self._cg_dgoal_min = float(cg.get("dgoal_min", 1.5))
         self._cg_clear_min = float(cg.get("clear_min", 1.0))
+        # ---- W5 围栏顶楔死（2026-09-05 活体取证）：云避障符号反转吸引子 ----------
+        # 原实现 u=(drone−point)=远离方向、v_app=cmd·u>0(正在远离)时触发、
+        # cmd -= push*u 且 push>=v_app → 远离分量被抵消再反向 = 逃离惩罚；
+        # 正对撞(v_app<0)反而不设防。W1 sep_obs_guard 同逻辑用 ex=x−px 指向
+        # 障碍削向分量，是正确镜像。实测 d5 坐西围栏顶缘(z=1.40, 点环 z=1.30
+        # d=0.14)时 8 个环点把 z 指令压到 −1.9 钉死机身。sign_fix=触发取反
+        # (靠近才推)+推力沿远离方向：正对撞→减速推离，逃离/悬停零侵入。
+        ca = cl.get("cloud_avoidance", {}) or {}
+        self._ca_sign_fix = bool(ca.get("sign_fix", False))
         self.replan_hz = float(cl.get("replan_hz", 10.0))
         self.closed_max_vel = float(cl.get("max_vel", 1.5))
         self._rng = random.Random(int(settings.get("run_seed", 42)) + self.drone_id * 7919)
@@ -1352,14 +1361,26 @@ class NavNode:
             if ed <= 1e-6:
                 ex, ed = 1.0, 1e-3
             ux, uy, uz = ex / ed, ey / ed, ez / ed
-            v_app = cmd[0] * ux + cmd[1] * uy + cmd[2] * uz
-            if v_app > 0:
-                danger = min(ed, dd)
-                push = v_app + max(0.0, react_r - danger) * 4.0 \
-                       + max(0.0, pred_r - dd) * 6.0
-                cmd[0] -= push * ux
-                cmd[1] -= push * uy
-                cmd[2] -= push * uz
+            if self._ca_sign_fix:
+                # 修复形态：v_in = 指向障碍的分量 >0（正在接近）才推，方向沿远离。
+                # 逃离/悬停 v_in<=0 零侵入——原形态的"逃离惩罚"吸引子由此消除。
+                v_in = -(cmd[0] * ux + cmd[1] * uy + cmd[2] * uz)
+                if v_in > 0.0:
+                    danger = min(ed, dd)
+                    push = v_in + max(0.0, react_r - danger) * 4.0 \
+                           + max(0.0, pred_r - dd) * 6.0
+                    cmd[0] += push * ux
+                    cmd[1] += push * uy
+                    cmd[2] += push * uz
+            else:
+                v_app = cmd[0] * ux + cmd[1] * uy + cmd[2] * uz
+                if v_app > 0:
+                    danger = min(ed, dd)
+                    push = v_app + max(0.0, react_r - danger) * 4.0 \
+                           + max(0.0, pred_r - dd) * 6.0
+                    cmd[0] -= push * ux
+                    cmd[1] -= push * uy
+                    cmd[2] -= push * uz
         vn = np.linalg.norm(cmd)
         if vn > self.max_vel:
             cmd = cmd * (self.max_vel / vn)

@@ -41,6 +41,11 @@ class CollisionMonitor:
         self.cooldown_dt = float(cc.get("cooldown_dt", 2.0))
         self.bounce_vel = float(cc.get("bounce_vel", 2.0))
         self.max_collisions = int(cc.get("max_collisions", 8))
+        # W5：围栏纳入碰撞事件集——西围栏顶缘 1.30 曾把低空穿行的 d5 物理托住
+        # （坐围栏顶 z=1.40），原监控器对围栏接触零事件零恢复。旗控 A/B 后定默认。
+        self.fence_events = bool(cc.get("fence_events", False))
+        self.fences = [o for o in s.obstacles if o.kind == "fence"] \
+            if self.fence_events else []
 
         self.pos = {}
         self.pub_col = {}
@@ -89,6 +94,17 @@ class CollisionMonitor:
                 nx = min(max(px, b.lo[0]), b.hi[0])
                 ny = min(max(py, b.lo[1]), b.hi[1])
                 nz = min(max(pz, b.lo[2]), b.hi[2])
+                dx, dy, dz = px - nx, py - ny, pz - nz
+                n = math.hypot(dx, dy, dz)
+                if n < 1e-9:
+                    n = 1.0
+                    dx, dy, dz = 1.0, 0.0, 0.0
+                return True, (dx / n, dy / n, dz / n)
+        for f in self.fences:
+            if self._sphere_aabb(px, py, pz, self.dr, f.lo, f.hi):
+                nx = min(max(px, f.lo[0]), f.hi[0])
+                ny = min(max(py, f.lo[1]), f.hi[1])
+                nz = min(max(pz, f.lo[2]), f.hi[2])
                 dx, dy, dz = px - nx, py - ny, pz - nz
                 n = math.hypot(dx, dy, dz)
                 if n < 1e-9:
