@@ -70,6 +70,14 @@ class NavNode:
         self._nstop_enabled = bool(nsz.get("enabled", False))
         self._nstop_zone_r = float(nsz.get("zone_r", 1.0))
         self._nstop_deadband = float(nsz.get("deadband", 0.2))
+        # ---- W3 塌缩卫兵（返航冻结：前瞻航点=自身 → 指令≈0 伺服自锁） ----
+        cg = cl.get("collapse_guard", {}) or {}
+        self._cg_enabled = bool(cg.get("enabled", False))
+        self._cg_min_cmd = float(cg.get("min_cmd", 0.3))
+        self._cg_floor_speed = float(cg.get("floor_speed", 0.8))
+        self._cg_min_target = float(cg.get("min_target", 0.75))
+        self._cg_dgoal_min = float(cg.get("dgoal_min", 1.5))
+        self._cg_clear_min = float(cg.get("clear_min", 1.0))
         self.replan_hz = float(cl.get("replan_hz", 10.0))
         self.closed_max_vel = float(cl.get("max_vel", 1.5))
         self._rng = random.Random(int(settings.get("run_seed", 42)) + self.drone_id * 7919)
@@ -783,6 +791,9 @@ class NavNode:
         # （clearance 每拍只算一次，P0 指标与 P1 锁定复用）
         clearance = self._min_clearance()
         self._clr_now = clearance
+        # W3 塌缩卫兵：接管退化的水平基指令（群集/分离/云避障/vcap 照常叠加）
+        if self._cg_enabled:
+            cmd = self._collapse_guard(cmd, now, clearance)
         # P1 时间一致性：侧向采样始终执行（供 P0 指标），锁定偏置仅 enabled 时
         self._sample_side(cmd, now)
         if self.tc_enabled:
@@ -819,6 +830,62 @@ class NavNode:
         vn = float(np.linalg.norm(cmd))
         if vn > vcap:
             cmd = cmd * (vcap / vn)
+        return cmd
+
+    # ---- W3 返航冻结（伺服自锁）修复：前瞻塌缩卫兵 -----------------------------
+    def _collapse_guard(self, cmd, now, clearance):
+        """规划自认健康而水平基指令≈0 → 前瞻航点塌缩回自身，接管基指令。
+
+        签名同 P3b 注释"lookahead 航点=自身 → 指令≈0"：路径分支 cmd=航点−est，
+        航点落在自机格/身边格时指令退化到厘米级，无人机被伺服锁死在定点
+        （返航腿起飞数米后 mm/s 爬行，run 214546/194437/live 三局同形态，
+        d5 三局全中）。P3b GOAL-SEAL 只治了 goal 封锁形态，这是通用形态：
+        沿路径从最近格向前找 ≥min_target 的航点接管；全路径都在身边（路径
+        退化为最近可达格终点）则直指 goal——同 GOAL-SEAL 语义，膨胀环是
+        幻影占用，反应层/限速照常兜底。接管只发生在基指令层，群集/分离/
+        云避障/vcap 全部照常叠加。
+        不接管的地盘：规划失败/无路径（de 逃逸接管）、距 goal 近（到位
+        收敛区）、真实净空不足（近障减速归反应层）。
+        触发日志 COLLAPSE-GUARD 同时是法证采样：base/best/len/pick 落实
+        塌缩机制本身。
+        """
+        if self._plan_fail_since is not None or self._gpath is None:
+            return cmd
+        if math.hypot(cmd[0], cmd[1]) >= self._cg_min_cmd:
+            return cmd
+        d_goal = math.hypot(self.goal[0] - self.odom[0],
+                            self.goal[1] - self.odom[1])
+        if d_goal < self._cg_dgoal_min:
+            return cmd
+        if clearance < self._cg_clear_min:
+            return cmd
+        ex, ey = self.est_pos[0], self.est_pos[1]
+        ci, cj = self._g_to_cell(ex, ey)
+        best = 0
+        best_d = 1e18
+        for k, (px, py) in enumerate(self._gpath):
+            d = (px - ci) * (px - ci) + (py - cj) * (py - cj)
+            if d < best_d:
+                best_d, best = d, k
+        tx = ty = None
+        pick = -1
+        for kk in range(best, len(self._gpath)):
+            wx, wy = self._g_to_world(self._gpath[kk][0], self._gpath[kk][1])
+            if math.hypot(wx - ex, wy - ey) >= self._cg_min_target:
+                tx, ty, pick = wx, wy, kk
+                break
+        if tx is None:
+            # 全路径都在身边：路径本身已退化（最近可达格终点）——直指 goal
+            tx, ty = self.goal[0], self.goal[1]
+        n = math.hypot(tx - ex, ty - ey) or 1.0
+        rospy.loginfo_throttle(
+            1.0, "nav_node: drone %d COLLAPSE-GUARD base=(%.3f,%.3f) "
+            "d_goal=%.1f best=%d len=%d pick=%d target=(%.2f,%.2f) "
+            "est=(%.2f,%.2f) clear=%.2f",
+            self.drone_id, cmd[0], cmd[1], d_goal, best, len(self._gpath),
+            pick, tx, ty, ex, ey, clearance)
+        cmd[0] = (tx - ex) / n * self._cg_floor_speed
+        cmd[1] = (ty - ey) / n * self._cg_floor_speed
         return cmd
 
     # ---- P1 时间一致性（DeFoP anti-oscillation 移植） --------------------------
