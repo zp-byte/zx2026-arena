@@ -194,6 +194,7 @@ class MissionExecutor:
         self._publish_phase("IDLE")
         self.pub_crossed.publish(Bool(data=False))
         rospy.loginfo("mission_executor_node: drone %d", self.drone_id)
+        self._phase_hb = rospy.Timer(rospy.Duration(1.0), self._phase_heartbeat)
 
     # ---------------------------------------------------------------- callbacks
     def _on_odom(self, msg):
@@ -333,6 +334,11 @@ class MissionExecutor:
 
     def _publish_phase(self, ph):
         self.pub_phase.publish(String(data=ph))
+
+    def _phase_heartbeat(self, _evt):
+        """1Hz 相位心跳：晚到订阅者（GCS agent 等）不依赖一次性锁存的
+        连接竞态——地面站按数据年龄判活，心跳比锁存一次性更稳。"""
+        self._publish_phase(self.state)
 
     def _fail(self, reason):
         self.state = "FAILED"

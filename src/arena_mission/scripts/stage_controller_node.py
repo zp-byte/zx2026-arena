@@ -84,6 +84,7 @@ class StageController:
     # ---------------------------------------------------------------- tick
     def run(self):
         rate = rospy.Rate(5)
+        hb = 0
         while not rospy.is_shutdown():
             now = rospy.get_time()
             limit = self.phase_timeout if self.state == "P3_TAKEOFF" else self.execute_timeout
@@ -97,6 +98,10 @@ class StageController:
                 else:
                     self._set_state("P5_RETURN")
                     self._set_state("DONE")
+            hb += 1
+            if hb % 5 == 0:
+                # 1Hz 状态心跳：晚到订阅者（GCS agent）不依赖一次性锁存的连接竞态
+                self.pub_state.publish(String(data=self.state))
             rate.sleep()
 
     def _set_state(self, st):
