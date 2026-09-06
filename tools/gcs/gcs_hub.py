@@ -19,6 +19,7 @@
 """
 import argparse
 import json
+import socket
 import socketserver
 import threading
 import time
@@ -27,6 +28,11 @@ from collections import deque
 ACTIVE_PHASES = {"TAKEOFF", "EXECUTE", "RETURN", "GOTO", "MISSION"}
 C_DIM, C_RED, C_YEL, C_GRN, C_RST = "\033[2m", "\033[31m", "\033[33m", \
     "\033[32m", "\033[0m"
+
+
+def _num(v):
+    """分值字段防御：TCP 透传来的畸形数据不炸 dash 主线程。"""
+    return v if isinstance(v, (int, float)) else 0
 
 
 class Hub(object):
@@ -45,7 +51,8 @@ class Hub(object):
         self.st = {i: {"data": None, "rx_t": 0.0, "stall_t0": None,
                        "stall_on": False, "lost_on": True,
                        "pdead_t0": None, "pdead_on": False,
-                       "bat_t0": None, "bat_on": False, "grid": None}
+                       "bat_t0": None, "bat_on": False, "grid": None,
+                       "score": None, "mission": None}
                    for i in self.ids}
         self.conns = 0
         self.stage = None  # 全局阶段机（/zx2026/state，agent 上报）
@@ -53,6 +60,7 @@ class Hub(object):
         self.logf = open(logpath, "a", encoding="utf-8")
         self.logpath = logpath
         self.status_path = status_path
+        self.last_swfail = 0.0  # 写盘失败告警节流
 
     # ---- 事件与日志 --------------------------------------------------------
     def event(self, did, kind, detail):
@@ -72,10 +80,19 @@ class Hub(object):
         with self.lock:
             if obj.get("stage") is not None:
                 self.stage = obj["stage"]
-            # 建图栅格（独立顶层键，1Hz 捎带）：只存最新，不进遥测 JSONL
+            # 建图栅格 / 比分 / 任务指派（独立顶层键，1Hz 捎带）：
+            # 只存最新，不进遥测 JSONL
             for did, g in (obj.get("grids") or {}).items():
                 if did in self.st:
                     self.st[did]["grid"] = g
+            for did, s in (obj.get("scores") or {}).items():
+                # 入库形状校验：非 dict / score 非数值=畸形，丢弃不覆盖旧值
+                if did in self.st and isinstance(s, dict) \
+                        and isinstance(s.get("score"), (int, float)):
+                    self.st[did]["score"] = s
+            for did, m in (obj.get("missions") or {}).items():
+                if did in self.st:
+                    self.st[did]["mission"] = m
             for did, d in obj.get("drones", {}).items():
                 if did not in self.st:
                     continue
@@ -93,6 +110,7 @@ class Hub(object):
     def watchdog(self):
         while True:
             now = time.time()
+            evs = []   # 事件在锁内只收集，锁外再落盘/打印（不持锁做 I/O）
             with self.lock:
                 for did in self.ids:
                     st = self.st[did]
@@ -101,11 +119,11 @@ class Hub(object):
                     # LINK LOST：边沿触发，恢复时也报（成对法证）
                     if age > self.link_lost_s and not st["lost_on"]:
                         st["lost_on"] = True
-                        self.event(did, "LINK_LOST", "age=%.1fs" % age)
+                        evs.append((did, "LINK_LOST", "age=%.1fs" % age))
                     elif age <= self.link_lost_s and st["lost_on"] and \
                             st["rx_t"] > 0:
                         st["lost_on"] = False
-                        self.event(did, "LINK_RECOVER", "age=%.1fs" % age)
+                        evs.append((did, "LINK_RECOVER", "age=%.1fs" % age))
                     if d is None or st["lost_on"]:
                         st["stall_t0"] = st["pdead_t0"] = None
                         st["stall_on"] = st["pdead_on"] = False
@@ -123,15 +141,14 @@ class Hub(object):
                                 not st["stall_on"]:
                             st["stall_on"] = True
                             pos = d.get("pos")
-                            self.event(did, "STALL",
-                                       "phase=%s v=%.3f pos=%s dur>=%ss"
-                                       % (phase, speed,
-                                          tuple(round(c, 2) for c in pos)
-                                          if pos else "?", self.stall_s))
+                            evs.append((did, "STALL",
+                                        "phase=%s v=%.3f pos=%s dur>=%ss"
+                                        % (phase, speed,
+                                           tuple(round(c, 2) for c in pos)
+                                           if pos else "?", self.stall_s)))
                     else:
                         if st["stall_on"]:
-                            self.event(did, "STALL_CLEAR",
-                                       "v=%.3f" % speed)
+                            evs.append((did, "STALL_CLEAR", "v=%.3f" % speed))
                         st["stall_t0"] = None
                         st["stall_on"] = False
                     # PLANNER DEAD：任务活跃但轨迹/规划流断
@@ -143,13 +160,13 @@ class Hub(object):
                         elif now - st["pdead_t0"] > self.plan_dead_s and \
                                 not st["pdead_on"]:
                             st["pdead_on"] = True
-                            self.event(did, "PLANNER_DEAD",
-                                       "plan_age=%.1fs phase=%s"
-                                       % (plan_age, phase))
+                            evs.append((did, "PLANNER_DEAD",
+                                        "plan_age=%.1fs phase=%s"
+                                        % (plan_age, phase)))
                     else:
                         if st["pdead_on"]:
-                            self.event(did, "PLANNER_OK",
-                                       "plan_age=%.1fs" % plan_age)
+                            evs.append((did, "PLANNER_OK",
+                                        "plan_age=%.1fs" % plan_age))
                         st["pdead_t0"] = None
                         st["pdead_on"] = False
                     # LOW BAT（real 模式；sim 电量 null 自动跳过）：
@@ -162,15 +179,17 @@ class Hub(object):
                         elif now - st["bat_t0"] > self.bat_low_s and \
                                 not st["bat_on"]:
                             st["bat_on"] = True
-                            self.event(did, "LOW_BAT",
-                                       "bat=%.0f%% < %.0f%%"
-                                       % (bat, self.bat_min))
+                            evs.append((did, "LOW_BAT",
+                                        "bat=%.0f%% < %.0f%%"
+                                        % (bat, self.bat_min)))
                     else:
                         if st["bat_on"]:
-                            self.event(did, "BAT_OK", "bat=%.0f%%"
-                                       % (bat if bat is not None else -1))
+                            evs.append((did, "BAT_OK", "bat=%.0f%%"
+                                        % (bat if bat is not None else -1)))
                         st["bat_t0"] = None
                         st["bat_on"] = False
+            for did, kind, detail in evs:
+                self.event(did, kind, detail)
             time.sleep(1.0)
 
     # ---- 状态快照文件（1Hz 原子写，ops/第 3 步面板的数据源） ---------------
@@ -181,10 +200,13 @@ class Hub(object):
             snap = {"hub_ts": round(now, 3), "stage": self.stage,
                     "conns": self.conns, "drones": {}}
             with self.lock:
+                linked = 0
                 for did in self.ids:
                     st = self.st[did]
                     d = st["data"]
                     age = now - st["rx_t"] if st["rx_t"] else None
+                    if age is not None and age <= self.link_lost_s:
+                        linked += 1
                     snap["drones"][did] = {
                         "age": round(age, 2) if age is not None else None,
                         "phase": d.get("phase") if d else None,
@@ -200,16 +222,31 @@ class Hub(object):
                 evs = list(self.events)[-50:]
                 grids = {did: self.st[did]["grid"] for did in self.ids
                          if self.st[did]["grid"] is not None}
+                scores = {did: self.st[did]["score"] for did in self.ids
+                          if self.st[did]["score"] is not None}
+                missions = {did: self.st[did]["mission"]
+                            for did in self.ids
+                            if self.st[did]["mission"] is not None}
+            snap["linked"] = linked   # 按数据年龄算的活链路数（比 TCP conns 真实）
             snap["events"] = evs
             snap["grids"] = grids
+            snap["scores"] = scores
+            snap["missions"] = missions
             try:
                 tmp = self.status_path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(snap, f, ensure_ascii=False)
                 import os
                 os.replace(tmp, self.status_path)
-            except Exception:
-                pass
+            except Exception as e:
+                # 写盘失败必须可见（"石化 status 文件"教训的代码层闭环）：
+                # 节流 10s 一条进事件流/日志，绝不静默
+                if now - self.last_swfail > 10.0:
+                    self.last_swfail = now
+                    try:
+                        self.event("hub", "STATUS_WRITE_FAIL", str(e)[:120])
+                    except Exception:
+                        print("[hub] status write FAIL: %s" % e, flush=True)
             time.sleep(1.0)
 
     # ---- ANSI 六格仪表（2Hz）----------------------------------------------
@@ -256,6 +293,17 @@ class Hub(object):
                                     pos, spd, pa, C_RST))
                 if alarms:
                     lines.append(" ALARM: " + " | ".join(alarms))
+                sc = [(did, self.st[did]["score"]) for did in self.ids
+                      if self.st[did]["score"]]
+                if sc:
+                    tot = sum(_num((s or {}).get("score")) for _, s in sc)
+                    cor = sum(_num((s or {}).get("correct")) for _, s in sc)
+                    wrg = sum(_num((s or {}).get("wrong")) for _, s in sc)
+                    lines.append(" SCORE total=%d correct=%d wrong=%d  %s"
+                                 % (tot, cor, wrg,
+                                    " ".join("d%s:%s" % (d, (s or {})
+                                                        .get("score"))
+                                             for d, s in sc)))
                 lines.append(" ---- events ----")
                 for ev in list(self.events)[-8:]:
                     lines.append(" %s d%s %s %s"
@@ -267,6 +315,21 @@ class Hub(object):
 
 
 class Handler(socketserver.StreamRequestHandler):
+    def setup(self):
+        # TCP keepalive：半开连接（agent 断电/拔线无 FIN）由内核探活回收，
+        # 否则 handler 线程与 conns 计数虚高。
+        # 注意用 self.request——self.connection 要父类 setup() 才存在；
+        # 且异常必须兜宽（AttributeError 漏网=每个连接建立即死，E2E 实弹抓到）
+        try:
+            sock = self.request
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except Exception:
+            pass
+        super().setup()
+
     def handle(self):
         hub = self.server.hub
         with hub.lock:
@@ -283,6 +346,13 @@ class Handler(socketserver.StreamRequestHandler):
         finally:
             with hub.lock:
                 hub.conns -= 1
+
+
+class Srv(socketserver.ThreadingTCPServer):
+    # allow_reuse_address 必须是类属性（bind 前读取）——曾写成实例属性在
+    # bind 之后才设=无效，hub 快速重启偶发 EADDRINUSE
+    allow_reuse_address = True
+    daemon_threads = True
 
 
 def main():
@@ -308,9 +378,8 @@ def main():
               args.stall_s, args.plan_dead, logpath, args.view,
               status_path=status_path, bat_min=args.bat_min,
               bat_low_s=args.bat_low_s)
-    srv = socketserver.ThreadingTCPServer(("0.0.0.0", args.port), Handler)
+    srv = Srv(("0.0.0.0", args.port), Handler)
     srv.hub = hub
-    srv.allow_reuse_address = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     threading.Thread(target=hub.watchdog, daemon=True).start()
     threading.Thread(target=hub.status_writer, daemon=True).start()
