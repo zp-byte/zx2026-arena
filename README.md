@@ -13,7 +13,7 @@
 - **反应层防御栈（W1-W5 稳健化战役产物）**：机间分离障碍护栏、云避障符号修复、返航塌缩卫兵、救援互斥、STALL 看门狗、退出迟滞——每个机制独立配置开关、A/B 矩阵验证后翻默认。
 - **6 机集群（Boids 速度层）**：分离 + 对齐 + 聚合（`swarm` 段，默认开）；静态编队 `formation.yaml` 退居备选、与群集互斥。
 - **类型匹配投放**：投放点视觉标识类型码与机载物类型匹配，匹配成功才触发投放。
-- **地面站（GCS）**：机载 agent + 地面聚合 hub + 操作编排 + PySide6 面板（见下文 [GCS 三部曲](#gcs-三部曲toolsgcs)）。
+- **地面站（GCS）**：机载 agent + 地面聚合 hub + 操作编排 + PySide6 面板 + 全局 PANIC 急停（六机同帧 ABORT）+ 六机合并建图态势图（见下文 [GCS 三部曲](#gcs-三部曲toolsgcs)）。
 - **YAML 全配置**：场景拓扑 / 竞赛规则 / 机队 / 仿真参数全部 YAML 驱动，改配置无需重编译。
 
 ---
@@ -125,21 +125,41 @@ bash run_verify.sh
 
 ## GCS 三部曲（`tools/gcs/`）
 
-**三条铁律**（W4/W5 法证结论固化）：①ROS 图不过 WiFi（agent 主动外连地面）；②死活按数据年龄判（不信 TCP/旧数据）；③agent 只读不控。
+**三条架构铁律**（W4/W5 法证结论固化）：①ROS 图不过 WiFi（agent 主动外连地面）；②死活按数据年龄判（不信 TCP/旧数据）；③agent 只读不控。
 
 | 步 | 文件 | 内容 |
 |---|---|---|
-| 1 看得见 | `gcs_agent.py` + `gcs_hub.py` | 机载只读采集（odom/phase/battery/fc/liveness/stage 全 profile 配置化）→ 5Hz TCP JSON 行流；hub 聚合 + 看门狗（LINK LOST/STALL/PLANNER DEAD 边沿触发）+ JSONL 法证 + ANSI 六格 + 1Hz 状态快照文件 |
-| 2 编排 | `gcs_ops.py` | 四段健康门 PREFLIGHT→POSITIONING→AUTONOMY→READY（全部从快照判据）；命令层 start/takeoff/back/land/panic（模板含 `{id}`=逐机错峰+重试，不含=全局一次）；仿真 trigger=`rosservice /zx2026/start`，真机=ssh 模板 |
-| 3 面板 | `gcs_panel.py` | PySide6 六机卡片+门灯+指令按钮+PANIC 双击确认；指令复用 Ops（Worker 线程，UI 不阻塞）；`--selftest` 自动 E2E 钩子 |
+| 1 看得见 | `gcs_agent.py` + `gcs_hub.py` | 机载只读采集（odom/phase/battery/fc/liveness/stage/**grid** 全 profile 配置化）→ 5Hz TCP JSON 行流（栅格 RLE 三值 1Hz 捎带）；hub 聚合 + 看门狗（LINK LOST/STALL/PLANNER DEAD/LOW_BAT 边沿触发+恢复成对）+ JSONL 法证 + ANSI 六格 + 1Hz 状态快照文件。executor/stage 侧配 1Hz 相位/阶段心跳（a058a46），晚到订阅者不依赖一次性锁存 |
+| 2 编排 | `gcs_ops.py` | 健康门分模式：sim 四门 PREFLIGHT→POSITIONING→AUTONOMY→READY；real 六门（+POWER/FC）。命令层 start/takeoff/back/land/panic（模板含 `{id}`=逐机错峰+重试，不含=全局一次）；仿真 trigger=`rosservice /zx2026/start`，真机=ssh 模板。**危险命令 `--yes`，panic 豁免永不设障** |
+| 3 面板 | `gcs_panel.py` | PySide6 六机卡片+门灯（随 profile 动态）+指令按钮+PANIC 双击确认；**MAP 态势图窗**（见第 4 步③）；real 模式红头幅+两段确认；`--selftest` 自动 E2E 钩子 |
+| 4 应急+态势 | `mission_executor_node` + agent/panel | ② **panic 通道**：全局话题 `/zx2026/abort` 一帧广播→六机同秒进 ABORT（**ABORT=操作员急停≠FAILED**，终态三分 DONE/FAILED/ABORT，盯飞只计 FAILED 为败）+hover-lock 悬停锁定+任务冻结；③ **建图上屏**：`/drone_{id}/occ_grid` → agent RLE（**0 空闲/1 占用/2 未知**，base64，单图 ~0.5-1.1KB）→ 快照 `grids` 键 → 面板 MAP |
+
+**MAP 态势图（3bcecc9）**：大图=六机栅格按世界坐标**合并**的全局图（union 裁剪到覆盖区 + 5m 网格线 + 分机颜色航向箭头/轨迹尾迹 + 比例尺 + 图例/建图占比），缩略图点击高亮单机；未知区与已探索空地分离着色，建图推进前沿一目了然。真机 profile grid=null（grid_map 点云需独立适配器）。
+
+**sim/real 一级开关**：profile 顶层 `mode: sim|real`（缺省 sim）。real 四件套：①六门+电量/FC；②start 起飞先行（错峰 takeoff→离地确认→trigger，超时 abort 宁可不起飞）；③CLI 危险命令 `--yes` 两段确认（panic 豁免）；④LOW_BAT 边沿告警——hub `--bat-min <pct>` 开（`--bat-low-s` 缺省持续 5s 防瞬时压降，sim 无电量自动跳过）。
 
 ```bash
-# 仿真联调三件套（三个终端，或参考 tools/gcs/ 内脚本）
-python3 tools/gcs/gcs_hub.py --view dash
-python3 tools/gcs/gcs_agent.py --profile tools/gcs/profile_sim.yaml
-python3 tools/gcs/gcs_ops.py --profile tools/gcs/profile_sim.yaml preflight   # 四门绿后
-python3 tools/gcs/gcs_ops.py --profile tools/gcs/profile_sim.yaml start       # 触发+盯飞
+# 一键起栈（清场+sim+agent+hub，宿主当前终端；详见运维铁律②）
+nohup bash tools/gcs/stack_up.sh > /tmp/stack_up.log 2>&1 & disown
+tail -f /tmp/stack_up.log        # 等 "STACK READY"
+
+# 面板（交互终端里跑；ops 子进程继承本终端环境）
+export ROS_MASTER_URI=http://127.0.0.1:11411 ROS_HOSTNAME=127.0.0.1
+source /opt/ros/noetic/setup.bash && source devel/setup.bash
+python3 tools/gcs/gcs_panel.py --profile tools/gcs/profile_sim.yaml
+
+# 无面板裸编排（可并行盯飞：start 阻塞，后台跑）
+python3 tools/gcs/gcs_ops.py --profile tools/gcs/profile_sim.yaml preflight
+python3 tools/gcs/gcs_ops.py --profile tools/gcs/profile_sim.yaml start &
 ```
+
+**运维铁律（2026-09-06 实战法证，条条带过事故）**：
+
+1. **诊断先验化石**：hub 死后 `run_logs/gcs_status.json` 冻结不更新——任何读它判相位的诊断第一步 `stat` mtime，一分钟不动=数据作废（假象能带偏一小时排障）。
+2. **栈宿主交互终端**：用上面的 `stack_up.sh` + `nohup … & disown` 放**自己终端**里；工具型后台会话（AI agent 等）保活不可靠，死一次=agent+hub 静默双亡、面板全程化石、任务跑完无人知。
+3. **面板必须带 ROS 环境启动**：面板指令经 ops 子进程下发、继承面板环境——缺 `ROS_MASTER_URI` 时 START 报 `rc=2 Unable to communicate with master`。
+4. **WSLg 面板窗口不见→强制 xcb**：`QT_QPA_PLATFORM=xcb` 重拉；仍不行 `wsl --shutdown` 重启 WSLg。
+5. occ_grid 只在闭环活跃（起飞+goal 已设）后发布——起飞前 MAP 显示 "no grid yet" 是预期不是 bug。
 
 **教训**：liveness 活性源必须选恒频话题（`vel_cmd` 20Hz），事件型话题（`path` 重规划才发）= PLANNER_DEAD 假死误报。
 
@@ -193,5 +213,5 @@ python3 tools/gcs/gcs_ops.py --profile tools/gcs/profile_sim.yaml start       # 
 
 - **碰撞即终结**：`world_node` 对任意碰撞（障碍或机间 `d < 2×机半径`）置 `collided=True` 并冻结速度——导航必须**预防**碰撞，`world_node` 是兜底而非避让。请勿改为非致命。
 - **同 seed 方差**：单 run 有小概率 W4 族冻结，机制判定必须多 run 矩阵 + 触发日志。
-- 9P/UNC 路径编辑 `.py` 会重置可执行位，`run_verify.sh` 启动前已自动 `chmod +x`。
+- 9P/UNC 路径编辑 `.py` 会重置可执行位，`run_verify.sh` 启动前已自动 `chmod +x`；`tools/gcs/` 下脚本编辑后需手动 `chmod +x`（roslaunch 找不到 node 的 "Cannot locate node" 多半是它）。
 - 调试日志 `/tmp/zx2026_smoke.log` 含 ROS 颜色码，`grep` 需加 `-a`。
