@@ -8,24 +8,33 @@ send_hz: 5.0
 ids: [0]                      # 单 agent 带本机: 写 [DRONE_ID] 的值
 topics:
   odom: /Odometry             # faster_lio 输出（twist 恒零时 agent 自动位置差分）
-  phase: null                 # TODO 实机确认 multipoint 状态机话题名后填
+  phase: null                 # 源码定论: multipoint 无状态机话题（multipointplan.cpp
+                              #   只发 takeoff_land/move_base_simple/goal/back_trigger/
+                              #   goal/planning_yaw）——任务终态判定走 MONITOR_TIMEOUT
+                              #   语义（盯飞超时=转 hub dash 人工盯）
   battery: /mavros/battery    # sensor_msgs/BatteryState
   fc: /mavros/state           # mavros_msgs/State (connected/mode)
-  liveness:                                     # TODO 实机确认话题名
-    - /drone_{id}_planning/trajectory
-  stage: null                  # TODO 比赛阶段机话题确认后填（无则 READY 门跳过 stage 检查）
+  liveness:                   # TODO 现场定谳: rostopic hz，判据=恒频贯穿"悬停+任务"两态
+    - /drone_{id}_planning/trajectory   # FSM 事件型(重规划才发,慎选)
+                              # 候选: /position_cmd (traj_server 100Hz 定时器)
+  stage: null                 # 真机无全局阶段机——READY 门走 "stage topic n/a" 分支
 
 # GCS v0 第 2 步：操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
-# 坐标纪律：模板含 {id}=逐机错峰+重试；不含=全局一次。IP/脚本路径待实飞勘误。
+# 脚本语义（sh_files 源码核实）: takeoff/land = /px4ctrl/takeoff_land cmd 1/2；
+# back = /back_trigger；trigger(pub_trigger) = /move_base_simple/goal 一帧
+# PoseStamped 触发 multipoint 预设航点（points.yaml/flight_type 决定航点）。
+# 脚本为 zsh 且 source 相对路径 —— 必须 cd 工作空间根再执行。
+# TODO 现场核实: 机 IP 网段 + 目录大小写（ls -d ~/Diff*，手册写 Diff-Planner、
+#   实机曾见 Diff-planner）+ ssh 免密（建议 ssh-copy-id 发公钥，勿用 sshpass）。
 ops:
   status_file: /home/ubuntu/zx2026_arena_ws/run_logs/gcs_status.json
   shell_prefix: ""
-  cmds:   # TODO 实飞前逐条核实: 机 IP 网段、登录方式、ops 脚本绝对路径
-    trigger: null   # TODO 比赛触发形式（裁判系统/手动 pub_trigger）确认后填
-    takeoff: "ssh nv@192.168.1.10{id} 'bash ~/Diff-planner/ops/takeoff.sh'"
-    back: "ssh nv@192.168.1.10{id} 'bash ~/Diff-planner/ops/back.sh'"
-    land: "ssh nv@192.168.1.10{id} 'bash ~/Diff-planner/ops/land.sh'"
-    panic: "ssh nv@192.168.1.10{id} 'bash ~/Diff-planner/ops/land.sh'"
+  cmds:
+    trigger: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/pub_trigger.sh'"
+    takeoff: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/takeoff.sh'"
+    back: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/back.sh'"
+    land: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/land.sh'"
+    panic: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/land.sh'"
   stagger_s: 2.0
   retries: 2
   execute_timeout_s: 600.0
