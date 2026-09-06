@@ -45,7 +45,7 @@ class Hub(object):
         self.st = {i: {"data": None, "rx_t": 0.0, "stall_t0": None,
                        "stall_on": False, "lost_on": True,
                        "pdead_t0": None, "pdead_on": False,
-                       "bat_t0": None, "bat_on": False}
+                       "bat_t0": None, "bat_on": False, "grid": None}
                    for i in self.ids}
         self.conns = 0
         self.stage = None  # 全局阶段机（/zx2026/state，agent 上报）
@@ -72,6 +72,10 @@ class Hub(object):
         with self.lock:
             if obj.get("stage") is not None:
                 self.stage = obj["stage"]
+            # 建图栅格（独立顶层键，1Hz 捎带）：只存最新，不进遥测 JSONL
+            for did, g in (obj.get("grids") or {}).items():
+                if did in self.st:
+                    self.st[did]["grid"] = g
             for did, d in obj.get("drones", {}).items():
                 if did not in self.st:
                     continue
@@ -194,7 +198,10 @@ class Hub(object):
                         "pdead_on": st["pdead_on"], "bat_on": st["bat_on"],
                     }
                 evs = list(self.events)[-50:]
+                grids = {did: self.st[did]["grid"] for did in self.ids
+                         if self.st[did]["grid"] is not None}
             snap["events"] = evs
+            snap["grids"] = grids
             try:
                 tmp = self.status_path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:

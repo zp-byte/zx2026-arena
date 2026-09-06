@@ -188,6 +188,8 @@ class MissionExecutor:
         rospy.Subscriber("/zx2026/state", String, self._on_state)
         rospy.Subscriber(ns + "/match/result", String, self._on_match)
         rospy.Subscriber(ns + "/payload/done", Bool, self._on_payload_done)
+        # GCS panic 通道（第 4 步 ②）：全局急停，全部 executor 各自进入 ABORT 终态
+        rospy.Subscriber("/zx2026/abort", String, self._on_abort)
 
         self._publish_phase("IDLE")
         self.pub_crossed.publish(Bool(data=False))
@@ -244,6 +246,21 @@ class MissionExecutor:
                 self._publish_phase("EXECUTE")
                 self._goto((self.drop[0], self.drop[1], self.cruise_z))
                 self._pending = "DESCEND"
+
+    def _on_abort(self, msg):
+        """GCS panic：原地悬停自锁（goal=当前位置，nav P 环收敛后指令≈0）。
+
+        与 FAILED 语义分离（FAILED=任务失败，ABORT=操作员急停）——hub/ops
+        的 terminal_phases 三态都算终局，但 FAILED 计数不含 ABORT。
+        """
+        if self.state in ("DONE", "FAILED", "ABORTED"):
+            return
+        self.state = "ABORTED"
+        self._publish_phase("ABORT")
+        o = self.odom
+        rospy.logwarn("drone %d ABORT (%s): hover-lock at (%.2f, %.2f, %.2f)",
+                      self.drone_id, msg.data, o[0], o[1], o[2])
+        self._goto((o[0], o[1], o[2]))
 
     def _on_payload_done(self, msg):
         if self.state == "DROP" and msg.data:
@@ -330,6 +347,8 @@ class MissionExecutor:
             rate.sleep()
 
     def _tick(self):
+        if self.state == "ABORTED":
+            return  # 急停后状态机冻结，不再发任何新航点/投放指令
         if self.state == "TAKEOFF_PENDING":
             if self.takeoff_at is not None and rospy.get_time() >= self.takeoff_at:
                 self.state = "TAKEOFF"

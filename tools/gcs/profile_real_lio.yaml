@@ -18,6 +18,8 @@ topics:
     - /drone_{id}_planning/trajectory   # FSM 事件型(重规划才发,慎选)
                               # 候选: /position_cmd (traj_server 100Hz 定时器)
   stage: null                 # 真机无全局阶段机——READY 门走 "stage topic n/a" 分支
+  grid: null                  # TODO 真机建图上屏: grid_map/occupancy 是 PointCloud2
+                              #   (需独立适配器), 与仿真 OccupancyGrid 不同型
 
 # GCS v0 第 2 步：操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
 # 脚本语义（sh_files 源码核实）: takeoff/land = /px4ctrl/takeoff_land cmd 1/2；

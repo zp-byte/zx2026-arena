@@ -24,11 +24,11 @@ import sys
 import time
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-                               QPlainTextEdit, QPushButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtGui import QColor, QImage, QPalette, QPixmap
+from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QGridLayout,
+                               QGroupBox, QHBoxLayout, QLabel, QMainWindow,
+                               QMessageBox, QPlainTextEdit, QPushButton,
+                               QVBoxLayout, QWidget)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gcs_ops import STAGES, Ops  # noqa: E402
@@ -146,6 +146,79 @@ class Card(QFrame):
                            % (border, CARD_BG))
 
 
+class MapDialog(QDialog):
+    """六机自建栅格地图窗（第 4 步 ③）：快照 grids → QImage 渲染 + 机位叠加。
+
+    各机栅格同处 world 系（原点/分辨率随格自带），全部机位置画到每张图上；
+    占用=橙、空闲=底色、机位=绿。500ms 跟随面板轮询刷新。
+    """
+
+    OCC = bytes((230, 126, 34))   # 占用格
+    FREE = bytes((16, 19, 26))    # 空闲格（近面板底色）
+    POS = bytes((46, 204, 113))   # 机位
+
+    def __init__(self, panel):
+        super().__init__()
+        self.panel = panel
+        self.setWindowTitle("fei tu A GCS - occupancy maps")
+        g = QGridLayout(self)
+        self.lbls = {}
+        for k, did in enumerate(panel.ops.ids):
+            lbl = QLabel("d%s: no map" % did)
+            lbl.setMinimumSize(240, 210)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet("border: 1px solid #555555; "
+                              "background: #0d1013; color: #888888;")
+            self.lbls[did] = lbl
+            g.addWidget(lbl, k // 3, k % 3)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start(500)
+
+    def refresh(self):
+        grids = self.panel.grids
+        drones = self.panel.last_drones
+        for did, lbl in self.lbls.items():
+            gd = grids.get(did)
+            if not gd:
+                continue
+            img = self._render(gd, drones)
+            pm = QPixmap.fromImage(img.scaled(
+                lbl.width() - 4, lbl.height() - 4, Qt.KeepAspectRatio,
+                Qt.FastTransformation))
+            lbl.setPixmap(pm)
+
+    @classmethod
+    def _render(cls, g, drones):
+        import base64
+        w, h, res = int(g["w"]), int(g["h"]), g["res"]
+        x0, y0 = g["x0"], g["y0"]
+        raw = base64.b64decode(g["rle"])
+        buf = bytearray(cls.FREE * (w * h))
+        idx = 0
+        for k in range(0, len(raw) - 1, 2):
+            run = raw[k + 1]
+            if raw[k]:
+                for m in range(run):
+                    c, r = (idx + m) % w, (idx + m) // w
+                    o = ((h - 1 - r) * w + c) * 3   # 行翻转：栅格原点在左下
+                    buf[o:o + 3] = cls.OCC
+            idx += run
+        for d in drones.values():
+            p = (d or {}).get("pos")
+            if not p:
+                continue
+            ix = int((p[0] - x0) / res)
+            iy = int((p[1] - y0) / res)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    xx, yy = ix + dx, iy + dy
+                    if 0 <= xx < w and 0 <= yy < h:
+                        o = ((h - 1 - yy) * w + xx) * 3
+                        buf[o:o + 3] = cls.POS
+        return QImage(bytes(buf), w, h, w * 3, QImage.Format_RGB888)
+
+
 class Panel(QMainWindow):
     def __init__(self, ops, poll_ms=500, selftest=False):
         super().__init__()
@@ -209,6 +282,11 @@ class Panel(QMainWindow):
             grid.addWidget(c, i // 3, i % 3)
         root.addLayout(grid)
 
+        # 地图窗状态（第 4 步 ③：建图上屏数据源 = poll 存的最新快照）
+        self.grids = {}
+        self.last_drones = {}
+        self._map_dlg = None
+
         # 指令按钮排（空模板=禁用置灰：不可达命令不给点）
         btns = QHBoxLayout()
         self.btns = {}
@@ -236,6 +314,10 @@ class Panel(QMainWindow):
             self.panic.setEnabled(False)
             self.panic.setToolTip("profile 未配置 panic/land — 禁用")
         btns.addWidget(self.panic)
+        self.map_btn = QPushButton("MAP")
+        self.map_btn.setToolTip("六机自建栅格地图（view-only，不依赖命令模板）")
+        self.map_btn.clicked.connect(self.toggle_map)
+        btns.addWidget(self.map_btn)
         root.addLayout(btns)
 
         # 日志窗
@@ -272,6 +354,14 @@ class Panel(QMainWindow):
         if enabled:
             self._disarm_panic()
 
+    def toggle_map(self):
+        if self._map_dlg is None or not self._map_dlg.isVisible():
+            self._map_dlg = MapDialog(self)
+            self._map_dlg.show()
+        else:
+            self._map_dlg.raise_()
+            self._map_dlg.activateWindow()
+
     # ---- 500ms 轮询快照 -----------------------------------------------------
     def poll(self):
         snap = self.ops.read_status()
@@ -284,6 +374,8 @@ class Panel(QMainWindow):
         self.stage_lbl.setText("stage %s" % (snap.get("stage") or "--"))
         self.conns_lbl.setText("conns %s" % snap.get("conns", "--"))
         drones = snap.get("drones", {})
+        self.last_drones = drones
+        self.grids = snap.get("grids") or {}
         for did, card in self.cards.items():
             d = drones.get(did)
             age = (d or {}).get("age")

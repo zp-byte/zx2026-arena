@@ -346,11 +346,15 @@ class Ops(object):
                     el = time.time() - t0
                     fails = [i for i in self.ids
                              if drones[i].get("phase") == "FAILED"]
-                    print(" ALL TERMINAL in %.0fs — DONE=%d FAILED=%s"
-                          % (el, len(self.ids) - len(fails),
+                    aborts = [i for i in self.ids
+                              if drones[i].get("phase") == "ABORT"]
+                    print(" ALL TERMINAL in %.0fs — DONE=%d ABORT=%s "
+                          "FAILED=%s"
+                          % (el, len(self.ids) - len(fails) - len(aborts),
+                             ",".join(aborts) or "0",
                              ",".join(fails) or "0"))
                     self.log("MISSION_END", elapsed_s=round(el, 1),
-                             failed=fails)
+                             aborted=aborts, failed=fails)
                     return 0 if not fails else 2
             if time.time() - t0 > monitor_timeout:
                 print(" MONITOR TIMEOUT — mission still running, "

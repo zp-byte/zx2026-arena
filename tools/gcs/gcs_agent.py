@@ -14,6 +14,7 @@
   仿真:  python3 gcs_agent.py --profile profile_sim.yaml
 """
 import argparse
+import base64
 import json
 import math
 import socket
@@ -23,7 +24,7 @@ import time
 
 import rospy
 import yaml
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import String
 
 
@@ -33,6 +34,7 @@ class Agent(object):
         self.ids = [str(i) for i in cfg["ids"]]
         self.lock = threading.Lock()
         self.state = {i: self._blank() for i in self.ids}
+        self.grids = {}    # did -> RLE 压缩占用栅格（第 4 步 ③：建图上屏）
         self.seq = 0
         self.tp = cfg["topics"]
         self.stage = None  # 全局阶段机（/zx2026/state），非 per-drone
@@ -68,6 +70,9 @@ class Agent(object):
             for k, lt in enumerate(live):
                 rospy.Subscriber(lt.format(id=i), rospy.AnyMsg,
                                  self._on_live, (i, k), queue_size=1)
+            if self.tp.get("grid"):
+                rospy.Subscriber(self.tp["grid"].format(id=i), OccupancyGrid,
+                                 self._on_grid, i, queue_size=1)
         stp = self.tp.get("stage")
         if stp:
             rospy.Subscriber(stp, String, self._on_stage, queue_size=2)
@@ -123,6 +128,41 @@ class Agent(object):
         with self.lock:
             self.state[i]["live_t"]["plan"] = time.time()
 
+    @staticmethod
+    def _rle_grid(msg):
+        """OccupancyGrid → RLE 压缩字典（值域 0/100 → bit，游程 ≤255 分块）。
+
+        全场 0.5m 栅格 ~1.7 万格，林地图 RLE 后典型几百字节；base64 编码
+        保持 JSON 行流 ascii 安全。快照专用通道（不进遥测 JSONL）。
+        """
+        w, h = int(msg.info.width), int(msg.info.height)
+        out = bytearray()
+        prev, run = -1, 0
+        for v in msg.data:
+            b = 1 if (v or 0) > 50 else 0
+            if b == prev and run < 255:
+                run += 1
+            else:
+                if prev >= 0:
+                    out.append(prev)
+                    out.append(run)
+                prev, run = b, 1
+        if prev >= 0:
+            out.append(prev)
+            out.append(run)
+        return {"w": w, "h": h, "res": float(msg.info.resolution),
+                "x0": float(msg.info.origin.position.x),
+                "y0": float(msg.info.origin.position.y),
+                "rle": base64.b64encode(bytes(out)).decode("ascii")}
+
+    def _on_grid(self, msg, i):
+        try:
+            g = self._rle_grid(msg)
+        except Exception:
+            return
+        with self.lock:
+            self.grids[i] = g
+
     # ---- TCP 发送（client 主动连地面站，断线重连，只发最新快照） ----------
     def spin_sender(self):
         host, port = self.cfg["server"]
@@ -151,6 +191,7 @@ class Agent(object):
         now = time.time()
         self.seq += 1
         drones = {}
+        grids = {}
         with self.lock:
             for i in self.ids:
                 st = self.state[i]
@@ -162,8 +203,14 @@ class Agent(object):
                     "phase": st["phase"], "ts": lt.get("odom", 0.0),
                     "plan_age": (now - lt["plan"]) if "plan" in lt else -1.0,
                 }
-        return {"agent_ts": now, "seq": self.seq, "stage": self.stage,
-                "drones": drones}
+            grids = {i: g for i, g in self.grids.items() if g is not None}
+        out = {"agent_ts": now, "seq": self.seq, "stage": self.stage,
+               "drones": drones}
+        if self.seq % 5 == 0 and grids:
+            # 建图栅格 1Hz 随流捎带（5Hz 消息每 5 帧一次），独立顶层键——
+            # 不进 drones 字典，遥测 JSONL 与看门狗零影响
+            out["grids"] = grids
+        return out
 
 
 def main():
