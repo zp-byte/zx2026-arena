@@ -13,7 +13,7 @@
 - **反应层防御栈（W1-W5 稳健化战役产物）**：机间分离障碍护栏、云避障符号修复、返航塌缩卫兵、救援互斥、STALL 看门狗、退出迟滞——每个机制独立配置开关、A/B 矩阵验证后翻默认。
 - **6 机集群（Boids 速度层）**：分离 + 对齐 + 聚合（`swarm` 段，默认开）；静态编队 `formation.yaml` 退居备选、与群集互斥。
 - **类型匹配投放**：投放点视觉标识类型码与机载物类型匹配，匹配成功才触发投放。
-- **地面站（GCS）**：机载 agent + 地面聚合 hub + 操作编排 + PySide6 面板 + 全局 PANIC 急停（六机同帧 ABORT）+ 六机合并建图态势图（见下文 [GCS 三部曲](#gcs-三部曲toolsgcs)）。
+- **地面站（GCS）**：机载 agent + 地面聚合 hub + 操作编排 + PySide6 面板 + 全局 PANIC 急停（六机同帧 ABORT）+ 六机合并建图态势图 + 比分/任务指派上屏 + 真机 ssh 调试窗（见下文 [GCS 三部曲](#gcs-三部曲toolsgcs)）。
 - **YAML 全配置**：场景拓扑 / 竞赛规则 / 机队 / 仿真参数全部 YAML 驱动，改配置无需重编译。
 
 ---
@@ -129,12 +129,16 @@ bash run_verify.sh
 
 | 步 | 文件 | 内容 |
 |---|---|---|
-| 1 看得见 | `gcs_agent.py` + `gcs_hub.py` | 机载只读采集（odom/phase/battery/fc/liveness/stage/**grid** 全 profile 配置化）→ 5Hz TCP JSON 行流（栅格 RLE 三值 1Hz 捎带）；hub 聚合 + 看门狗（LINK LOST/STALL/PLANNER DEAD/LOW_BAT 边沿触发+恢复成对）+ JSONL 法证 + ANSI 六格 + 1Hz 状态快照文件。executor/stage 侧配 1Hz 相位/阶段心跳（a058a46），晚到订阅者不依赖一次性锁存 |
-| 2 编排 | `gcs_ops.py` | 健康门分模式：sim 四门 PREFLIGHT→POSITIONING→AUTONOMY→READY；real 六门（+POWER/FC）。命令层 start/takeoff/back/land/panic（模板含 `{id}`=逐机错峰+重试，不含=全局一次）；仿真 trigger=`rosservice /zx2026/start`，真机=ssh 模板。**危险命令 `--yes`，panic 豁免永不设障** |
+| 1 看得见 | `gcs_agent.py` + `gcs_hub.py` | 机载只读采集（odom/phase/battery/fc/liveness/stage/**grid** 全 profile 配置化）→ 5Hz TCP JSON 行流（栅格 RLE 三值 1Hz 捎带）；hub 聚合 + 看门狗（LINK LOST/STALL/PLANNER DEAD/LOW_BAT 边沿触发+恢复成对）+ JSONL 法证 + ANSI 六格 + 1Hz 状态快照文件（写盘失败节流告警不静默；TCP keepalive 收半开连接；`linked`=按数据年龄的活链路数）。executor/stage 侧配 1Hz 相位/阶段心跳（a058a46），晚到订阅者不依赖一次性锁存 |
+| 2 编排 | `gcs_ops.py` | 健康门分模式：sim 四门 PREFLIGHT→POSITIONING→AUTONOMY→READY；real 六门（+POWER/FC）。命令层 start/takeoff/back/land/panic/debug（模板含 `{id}`=逐机错峰+重试，不含=全局一次）；仿真 trigger=`rosservice /zx2026/start`，真机=ssh 模板（BatchMode/ConnectTimeout/accept-new 三参数纪律）。**危险命令 `--yes`，panic 豁免永不设障**；panic 逐机汇报成败（未降落者列出+人工提示，rc=1）；real start 空中误发保护（z≥airborne_z 拒绝，--force 放行）+ 离地确认失败自动对已离地机 land 回滚；盯飞行实时打总比分 |
 | 3 面板 | `gcs_panel.py` | PySide6 六机卡片+门灯（随 profile 动态）+指令按钮+PANIC 双击确认；**MAP 态势图窗**（见第 4 步③）；real 模式红头幅+两段确认；`--selftest` 自动 E2E 钩子 |
 | 4 应急+态势 | `mission_executor_node` + agent/panel | ② **panic 通道**：全局话题 `/zx2026/abort` 一帧广播→六机同秒进 ABORT（**ABORT=操作员急停≠FAILED**，终态三分 DONE/FAILED/ABORT，盯飞只计 FAILED 为败）+hover-lock 悬停锁定+任务冻结；③ **建图上屏**：`/drone_{id}/occ_grid` → agent RLE（**0 空闲/1 占用/2 未知**，base64，单图 ~0.5-1.1KB）→ 快照 `grids` 键 → 面板 MAP |
 
 **MAP 态势图（3bcecc9）**：大图=六机栅格按世界坐标**合并**的全局图（union 裁剪到覆盖区 + 5m 网格线 + 分机颜色航向箭头/轨迹尾迹 + 比例尺 + 图例/建图占比），缩略图点击高亮单机；未知区与已探索空地分离着色，建图推进前沿一目了然。真机 profile grid=null（grid_map 点云需独立适配器）。
+
+**比分/任务指派上屏**：agent 订阅 `/zx2026/score/{id}`（Score）与 `/zx2026/mission/{id}`（任务指派），1Hz 随流捎带 → hub 透传 → 面板比分条（总分/正确/错 + `d0 A→P3 10分`）与卡片分值；ops 盯飞行与 MISSION_END 同步打印。真机无 scorekeeper 自动显示 --。
+
+**真机 ssh 调试接口**：profile `ops.debug_ssh`（通道模板）+ `ops.debug_cmds`（命名只读命令：ping/ws/ros/hz/echo/node/proc/res/log，`{args}` 参数槽）。CLI `gcs_ops.py --profile <p> debug <名> [args]`；面板 **DEBUG 窗**（选机+选命令+RUN 回显，sim 置灰）。约定只读——写操作一律走命令层（两段确认）。preflight 真机先自动跑 `ops.probe` 探针名单（ssh 连通/目录勘误，**不阻断门**）——把"TODO 现场核实"变成启动自检。
 
 **sim/real 一级开关**：profile 顶层 `mode: sim|real`（缺省 sim）。real 四件套：①六门+电量/FC；②start 起飞先行（错峰 takeoff→离地确认→trigger，超时 abort 宁可不起飞）；③CLI 危险命令 `--yes` 两段确认（panic 豁免）；④LOW_BAT 边沿告警——hub `--bat-min <pct>` 开（`--bat-low-s` 缺省持续 5s 防瞬时压降，sim 无电量自动跳过）。
 
