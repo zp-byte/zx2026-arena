@@ -35,6 +35,8 @@ class Agent(object):
         self.lock = threading.Lock()
         self.state = {i: self._blank() for i in self.ids}
         self.grids = {}    # did -> RLE 压缩占用栅格（第 4 步 ③：建图上屏）
+        self.scores = {}   # did -> 比分明细（scorekeeper /zx2026/score/<id>）
+        self.missions = {}  # did -> 任务指派（/zx2026/mission/<id>）
         self.seq = 0
         self.tp = cfg["topics"]
         self.stage = None  # 全局阶段机（/zx2026/state），非 per-drone
@@ -76,6 +78,26 @@ class Agent(object):
         stp = self.tp.get("stage")
         if stp:
             rospy.Subscriber(stp, String, self._on_stage, queue_size=2)
+        # 比分/任务指派（sim scorekeeper latched；真机 profile 为 null 自动跳过；
+        # 车载无 zx2026_common 时仅告警降级，不影响其余采集）
+        if self.tp.get("score") or self.tp.get("mission"):
+            try:
+                from zx2026_common.msg import Mission as MissionMsg
+                from zx2026_common.msg import Score as ScoreMsg
+            except ImportError:
+                rospy.logwarn("gcs_agent: zx2026_common.msg 不可用 — "
+                              "score/mission 采集降级关闭")
+            else:
+                if self.tp.get("score"):
+                    for i in self.ids:
+                        rospy.Subscriber(self.tp["score"].format(id=i),
+                                         ScoreMsg, self._on_score, i,
+                                         queue_size=1)
+                if self.tp.get("mission"):
+                    for i in self.ids:
+                        rospy.Subscriber(self.tp["mission"].format(id=i),
+                                         MissionMsg, self._on_mission, i,
+                                         queue_size=1)
 
     def _on_odom(self, msg, i):
         p = msg.pose.pose.position
@@ -122,6 +144,20 @@ class Agent(object):
     def _on_stage(self, msg):
         with self.lock:
             self.stage = str(msg.data)
+
+    def _on_score(self, msg, i):
+        with self.lock:
+            self.scores[i] = {"score": int(msg.score),
+                              "correct": int(msg.correct_drops),
+                              "wrong": int(msg.wrong_drops),
+                              "state": str(msg.mission_state)}
+
+    def _on_mission(self, msg, i):
+        with self.lock:
+            self.missions[i] = {"payload": str(msg.payload_type),
+                                "drop": int(msg.drop_point_id),
+                                "marker": str(msg.marker_id),
+                                "seq": int(msg.mission_seq)}
 
     def _on_live(self, _msg, key):
         i, _k = key
@@ -193,6 +229,8 @@ class Agent(object):
         self.seq += 1
         drones = {}
         grids = {}
+        scores = {}
+        missions = {}
         with self.lock:
             for i in self.ids:
                 st = self.state[i]
@@ -205,12 +243,19 @@ class Agent(object):
                     "plan_age": (now - lt["plan"]) if "plan" in lt else -1.0,
                 }
             grids = {i: g for i, g in self.grids.items() if g is not None}
+            scores = dict(self.scores)
+            missions = dict(self.missions)
         out = {"agent_ts": now, "seq": self.seq, "stage": self.stage,
                "drones": drones}
-        if self.seq % 5 == 0 and grids:
-            # 建图栅格 1Hz 随流捎带（5Hz 消息每 5 帧一次），独立顶层键——
-            # 不进 drones 字典，遥测 JSONL 与看门狗零影响
-            out["grids"] = grids
+        if self.seq % 5 == 0:
+            # 栅格/比分/任务指派 1Hz 随流捎带（5Hz 消息每 5 帧一次），独立
+            # 顶层键——不进 drones 字典，遥测 JSONL 与看门狗零影响
+            if grids:
+                out["grids"] = grids
+            if scores:
+                out["scores"] = scores
+            if missions:
+                out["missions"] = missions
         return out
 
 

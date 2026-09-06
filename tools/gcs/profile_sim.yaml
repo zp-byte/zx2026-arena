@@ -13,6 +13,8 @@ topics:
     - /drone_{id}/vel_cmd                       #  死即断；/path 重规划才发=假死误报）
   grid: /drone_{id}/occ_grid                    # 闭环建图栅格（1Hz 进快照→面板地图）
   stage: /zx2026/state                          # 全局阶段机（P1..P5/DONE）
+  score: /zx2026/score/{id}                     # zx2026_common/Score（latched，比分条）
+  mission: /zx2026/mission/{id}                 # 任务指派（latched，payload→投放点）
 
 # GCS v0 第 2 步：操作编排（gcs_ops.py）——命令模板与门限全配置化
 ops:
