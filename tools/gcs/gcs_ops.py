@@ -19,8 +19,13 @@ mode: real 的附加保护：
   panic 豁免——急停链路永不设确认障碍。
 
 命令层（模板全在 profile，仿真=rosservice，真机=ssh，本文件不含一处地址）：
-  status / preflight / start(TRIGGER) / takeoff / back / land / panic
-  错峰起飞 stagger_s + 单机重试 retries；panic=land-all 逐机必达不中止。
+  status / preflight / start(TRIGGER) / takeoff / back / land / panic / debug
+  错峰起飞 stagger_s + 单机重试 retries；panic=land-all 逐机必达不中止，
+  结果逐机汇报（未降落者列出+给人工介入提示，rc=1）。
+  debug=真机 ssh 调试接口（ops.debug_ssh 通道 + ops.debug_cmds 命名只读命令，
+  面板 DEBUG 窗同源）；preflight 真机先跑 ops.probe 探针（不阻断门）。
+  real start 附加保护：空中(z>=airborne_z)拒绝重复 start（--force 才放行）；
+  离地确认失败自动对已离地机 land 回滚。
 
 用法：
   python3 gcs_ops.py --profile profile_sim.yaml preflight
@@ -31,6 +36,7 @@ import argparse
 import json
 import math
 import os
+import shlex
 import subprocess
 import time
 
@@ -72,6 +78,12 @@ class Ops(object):
         self.execute_timeout_s = float(ops.get("execute_timeout_s", 300.0))
         self.terminal_phases = set(ops.get("terminal_phases",
                                            ["DONE", "FAILED"]))
+        # 真机调试接口（ssh）：debug_ssh=通道模板({id})，debug_cmds=命名
+        # 远端命令（约定只读；{args} 可选参数槽），probe=preflight 探针名单
+        self.debug_ssh = ops.get("debug_ssh")
+        self.debug_cmds = ops.get("debug_cmds", {}) or {}
+        self.probe = ops.get("probe", []) or []
+        self.last_results = []  # 最近一次 dispatch 的 (id, ok) 明细
         logdir = ops.get("logdir", "/home/ubuntu/zx2026_arena_ws/run_logs")
         self.logpath = "%s/gcs_ops_%s.jsonl" % (
             logdir, time.strftime("%Y%m%d_%H%M%S"))
@@ -185,6 +197,8 @@ class Ops(object):
         print(" STAGE -> %s" % cur)
 
     def preflight(self, timeout_s):
+        if self.mode == "real" and self.probe:
+            self._probe_real()
         t0 = time.time()
         while True:
             snap = self.read_status()
@@ -203,8 +217,11 @@ class Ops(object):
 
     # ---- 命令层 ------------------------------------------------------------
     def _run(self, cmd, did=None, timeout=15.0):
-        full = self.shell_prefix + cmd.format(id=did if did is not None
-                                              else "")
+        # 用 replace 不用 .format：命令串（debug 拼装/模板）可能含字面花括号
+        # （awk '{print $1}' 等），.format 直接 KeyError；也杜绝把已组装好的
+        # 调试命令二次 format（{args} 里再有 {id} 被吞的暗坑）
+        full = self.shell_prefix + cmd.replace(
+            "{id}", did if did is not None else "")
         try:
             p = subprocess.run(
                 ["bash", "-c", full], capture_output=True, text=True,
@@ -215,7 +232,13 @@ class Ops(object):
             return -1, "", str(e)
 
     def dispatch(self, action, ids=None):
-        """模板含 {id}=逐机错峰+重试；不含=全局一次。返回全成与否。"""
+        """模板含 {id}=逐机错峰+重试；不含=全局一次。返回全成与否。
+
+        last_results 三态：None=未执行（模板缺失早退——调用方据实报
+        「未送达」而非假成功）；[(None, ok)]=全局模板一次广播；
+        [(id, ok), ...]=逐机明细。
+        """
+        self.last_results = None
         tmpl = self.cmds.get(action)
         if tmpl is None and action == "panic":
             tmpl = self.cmds.get("land")  # panic 走 panic→land 模板链
@@ -227,6 +250,7 @@ class Ops(object):
         if "{id}" not in tmpl:
             rc, out, err = self._run(tmpl)
             ok = rc == 0
+            self.last_results = [(None, ok)]
             print(" [%s] rc=%d %s" % (action, rc, (out or err).strip()
                                       .replace("\n", " ")[:120]))
             self.log("CMD", action=action, rc=rc, out=out.strip()[:200],
@@ -234,6 +258,7 @@ class Ops(object):
             return ok
         ids = ids if ids is not None else self.ids
         all_ok = True
+        self.last_results = []
         for n, i in enumerate(ids):
             if n:
                 time.sleep(self.stagger_s)
@@ -250,28 +275,36 @@ class Ops(object):
                          (err or out).strip().replace("\n", " ")[:100]))
             mark = C_GRN + "OK" + C_RST if ok else C_RED + "FAIL" + C_RST
             print(" d%s %s %s" % (i, action, mark))
+            self.last_results.append((i, ok))
             all_ok = all_ok and ok
         return all_ok
 
     # ---- 离地确认（real 起飞先行流程）---------------------------------------
+    @staticmethod
+    def _z_of(drones, i):
+        p = (drones.get(i) or {}).get("pos")
+        if p and len(p) > 2 and all(math.isfinite(c) for c in p):
+            return p[2]
+        return None
+
+    def _airborne_ids(self, drones=None):
+        """z >= airborne_z 的机列表（数据源=hub 快照；误发保护/回滚共用）。"""
+        if drones is None:
+            drones = (self.read_status() or {}).get("drones", {})
+        return [i for i in self.ids
+                if (self._z_of(drones, i) or -1e9) >= self.airborne_z]
+
     def wait_airborne(self):
         """全部机 z >= airborne_z 才算离地；超时=失败（宁可不起飞）。"""
         print(" airborne confirm: z >= %.1fm, timeout %.0fs"
               % (self.airborne_z, self.airborne_timeout_s))
         t0 = time.time()
         while True:
-            snap = self.read_status()
-            drones = (snap or {}).get("drones", {})
-
-            def z_of(i):
-                p = (drones.get(i) or {}).get("pos")
-                if p and len(p) > 2 and all(math.isfinite(c) for c in p):
-                    return p[2]
-                return None
-            up = [i for i in self.ids
-                  if (z_of(i) or -1e9) >= self.airborne_z]
-            ph = " ".join("%s:%s" % (i, "%.1f" % z_of(i)
-                                     if z_of(i) is not None else "--")
+            drones = (self.read_status() or {}).get("drones", {})
+            up = self._airborne_ids(drones)
+            ph = " ".join("%s:%s" % (i, "%.1f" % self._z_of(drones, i)
+                                     if self._z_of(drones, i) is not None
+                                     else "--")
                           for i in self.ids)
             print("  [%3.0fs] z %s (%d/%d up)"
                   % (time.time() - t0, ph, len(up), len(self.ids)))
@@ -295,14 +328,44 @@ class Ops(object):
         self.log("START", force=force, mode=self.mode)
         if self.mode == "real":
             # 真机：起飞先行 → 离地确认 → 再触发任务（sim 直接 trigger）
+            flying = self._airborne_ids()
+            if flying and not force:
+                print(" REFUSED: d%s 已在空中(z>=%.1fm) — 疑似任务中途重复 "
+                      "start（READY 门在真机无 stage 话题时放行，此处兜底）；"
+                      "续飞用 back/land，确要重发加 --force"
+                      % (",".join(flying), self.airborne_z))
+                self.log("START_REFUSED_AIRBORNE", flying=flying)
+                return 1
             print(" REAL MODE: staggered takeoff first.")
             if not self.dispatch("takeoff"):
                 print(" takeoff dispatch failed — abort before trigger.")
                 self.log("TAKEOFF_FAIL")
                 return 1
             if not self.wait_airborne():
-                print(" airborne confirm FAILED — mission NOT triggered.")
-                self.log("AIRBORNE_FAIL")
+                # 回滚：已离地的机就地召回（不给半空机群触任务）
+                up = self._airborne_ids()
+                self.log("AIRBORNE_FAIL", up=up)
+                if up:
+                    print(" airborne confirm FAILED — 已离地 d%s 就地 land "
+                          "回滚（任务不触发）" % ",".join(up))
+                    self.log("AIRBORNE_ROLLBACK", up=up)
+                    if not self.dispatch("land", ids=up):
+                        # 回滚失败必须喊人——滞留空中且日志假成功最不可接受
+                        res = self.last_results
+                        if res is None:
+                            print(" ROLLBACK FAILED — land 模板未配置，d%s "
+                                  "仍在空中：立即人工介入（遥控器 land / "
+                                  "panic）" % ",".join(up))
+                            self.log("ROLLBACK_FAIL", reason="no-land-tmpl",
+                                     up=up)
+                        else:
+                            rb = [str(i) for i, r in res if not r]
+                            print(" ROLLBACK FAILED — d%s land 未确认，仍在"
+                                  "空中：立即人工介入（遥控器 land / panic）"
+                                  % (",".join(rb) or "全部"))
+                            self.log("ROLLBACK_FAIL", failed=rb)
+                else:
+                    print(" airborne confirm FAILED — mission NOT triggered.")
                 return 1
         if self.cmds.get("trigger") is None:
             # 真机 profile trigger 待补/任务自启：跳过触发，直接盯飞
@@ -339,9 +402,13 @@ class Ops(object):
                         "%s:%s" % (i, (drones.get(i) or {})
                                    .get("phase") or "?")
                         for i in self.ids)
-                    print(" [%3.0fs] stage=%s %s (%d/%d terminal)"
+                    sc = snap.get("scores") or {}
+                    tot = sum(int((s or {}).get("score") or 0)
+                              for s in sc.values())
+                    print(" [%3.0fs] stage=%s %s (%d/%d terminal) score=%s"
                           % (now - t0, snap.get("stage") or "?", ph,
-                             len(done), len(self.ids)))
+                             len(done), len(self.ids),
+                             tot if sc else "--"))
                 if len(done) == len(self.ids):
                     el = time.time() - t0
                     fails = [i for i in self.ids
@@ -353,8 +420,21 @@ class Ops(object):
                           % (el, len(self.ids) - len(fails) - len(aborts),
                              ",".join(aborts) or "0",
                              ",".join(fails) or "0"))
+                    sc = snap.get("scores") or {}
+                    if sc:
+                        tot = sum(int((s or {}).get("score") or 0)
+                                  for s in sc.values())
+                        cor = sum(int((s or {}).get("correct") or 0)
+                                  for s in sc.values())
+                        wrg = sum(int((s or {}).get("wrong") or 0)
+                                  for s in sc.values())
+                        print(" SCORE total=%d correct=%d wrong=%d | %s"
+                              % (tot, cor, wrg,
+                                 " ".join("d%s:%s" % (d, (s or {}).get("score"))
+                                          for d, s in sorted(sc.items()))))
                     self.log("MISSION_END", elapsed_s=round(el, 1),
-                             aborted=aborts, failed=fails)
+                             aborted=aborts, failed=fails,
+                             score=sc or None)
                     return 0 if not fails else 2
             if time.time() - t0 > monitor_timeout:
                 print(" MONITOR TIMEOUT — mission still running, "
@@ -373,13 +453,87 @@ class Ops(object):
         self.print_table(snap, res, cur)
         return 0
 
+    # ---- 真机调试接口（ssh）-------------------------------------------------
+    def debug_cli(self, name, cmd_args, ids=None):
+        """ops debug <名> [args]：跑 profile ops.debug_cmds 里的命名 ssh 命令。
+
+        无参列出可用命令；结果只打印+落 JSONL（DBG 记录），约定只读。
+        """
+        if not self.debug_ssh:
+            print(" profile 未配置 ops.debug_ssh — 真机调试接口不可用"
+                  "（sim profile 无此段）")
+            return 2
+        if not name or name == "list":
+            print(" debug cmds: %s" % " ".join(sorted(self.debug_cmds)))
+            print(" 用法: gcs_ops.py --profile <p> debug <名> [args] "
+                  "[--ids 0,2]")
+            return 0
+        cmd = self.debug_cmds.get(name)
+        if cmd is None:
+            print(" 未知调试命令 '%s' — 可用: %s"
+                  % (name, " ".join(sorted(self.debug_cmds))))
+            return 2
+        if "{args}" in cmd and not cmd_args:
+            print(" 调试命令 '%s' 需要参数 {args}" % name)
+            return 2
+        # ids 类型归一：CLI 传逗号串，面板传 list——历史版只当字符串
+        # .split()，DEBUG 窗每次 RUN 必 AttributeError（审查确认 HIGH）
+        ids = ids.split(",") if isinstance(ids, str) else (ids or self.ids)
+        all_ok = True
+        for i in ids:
+            # replace 而非 .format：debug_cmds 若含字面花括号（awk '{...}'）
+            # .format 直接 KeyError；命令串组装完毕后不再二次格式化
+            full = "%s %s" % (
+                self.debug_ssh.replace("{id}", str(i)),
+                shlex.quote(cmd.replace("{args}", cmd_args or "")))
+            rc, out, err = self._run(full, timeout=30.0)
+            mark = C_GRN + "OK" + C_RST if rc == 0 \
+                else C_RED + "FAIL rc=%d" % rc + C_RST
+            body = (out or err).strip()
+            # 多行原样回显（ros/node/proc/res 压平截断 200 字符=不可读）
+            print(" d%s %s" % (i, mark))
+            if body:
+                print(body[:2000])
+            self.log("DBG", name=name, drone=i, rc=rc, out=body[:300])
+            all_ok = all_ok and rc == 0
+        return 0 if all_ok else 1
+
+    def _probe_real(self):
+        """联调勘误探针（profile ops.probe=debug_cmds 名单，不阻断门）。
+
+        把 TODO 清单变成启动自检：ssh 免密/目录大小写/远端 ROS 榛活，
+        失败即列修复提示——不靠人记勘误清单。
+        """
+        print(" REAL PROBES (联调勘误探针，不阻断门):")
+        for name in self.probe:
+            if name not in self.debug_cmds:
+                print("  %-6s 未定义于 ops.debug_cmds — 跳过" % name)
+                continue
+            rows = []
+            for i in self.ids:
+                full = "%s %s" % (
+                    self.debug_ssh.replace("{id}", str(i)),
+                    shlex.quote(self.debug_cmds[name]))
+                rc, out, err = self._run(full, timeout=30.0)
+                rows.append("d%s:%s" % (i, "OK" if rc == 0 else
+                                        "FAIL rc=%d %s"
+                                        % (rc, (err or out).strip()[:40])))
+            self.log("PROBE", name=name, detail="; ".join(rows))
+            print("  %-6s %s" % (name, "  ".join(rows)))
+        print("  ↑ 失败修复: ssh-copy-id 发公钥; ls -d ~/Diff* 核目录大小写;"
+              " 现场核实 IP 网段")
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", required=True)
     ap.add_argument("action",
                     choices=["status", "preflight", "start", "takeoff",
-                             "back", "land", "panic"])
+                             "back", "land", "panic", "debug"])
+    ap.add_argument("debug_name", nargs="?", default=None,
+                    help="debug 子命令名（无参=list 可用命令）")
+    ap.add_argument("debug_args", nargs="?", default=None,
+                    help="debug 命令的 {args} 参数")
     ap.add_argument("--ids", default=None, help="逗号分隔，缺省=全队")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--yes", action="store_true",
@@ -397,12 +551,41 @@ def main():
                   "(CLI 直发；面板走两段确认后代传 --yes)" % args.action)
             raise SystemExit(2)
     if args.action == "panic":
-        # land-all：逐机必达（模板带 {id} 时单机失败不中止）
+        # land-all：逐机必达（模板带 {id} 时单机失败不中止）；
+        # 结果必须汇报——急停链路"静默失败/假成功"是最不可接受的失败
         ids = args.ids.split(",") if args.ids else ops.ids
         print(" PANIC LAND ALL ids=%s" % ",".join(ids))
         ops.log("PANIC", ids=ids)
-        ops.dispatch("panic", ids=ids)
-        return
+        ok = ops.dispatch("panic", ids=ids)
+        res = ops.last_results
+        if res is None:
+            # 模板缺失=一条命令都没发——绝不能报 COMPLETE
+            print(" PANIC NOT SENT — panic/land 模板未配置，急停链路未送达！")
+            print(" → 立即人工介入: 遥控器逐机手动 land")
+            ops.log("PANIC_NOT_SENT")
+            raise SystemExit(2)
+        if any(i is None for i, _ in res):
+            # 全局模板：一次广播，无逐机确认语义——不得冒充"逐机送达"
+            if ok:
+                print(" PANIC SENT — 全局急停广播已发（无逐机确认语义，"
+                      "人工盯降落）")
+                ops.log("PANIC_SENT_GLOBAL")
+            else:
+                print(" PANIC FAILED — 全局急停广播发送失败，立即人工介入！")
+                ops.log("PANIC_GLOBAL_FAIL")
+            raise SystemExit(0 if ok else 1)
+        failed = [str(i) for i, r in res if not r]
+        if failed:
+            print(" PANIC INCOMPLETE — 未确认降落: d%s" % ",".join(failed))
+            print(" → 立即人工介入: 遥控器手动 land；或单机重发 "
+                  "`gcs_ops.py ... panic --ids %s`；真机另可用 DEBUG 窗 "
+                  "ros 命令核查 /px4ctrl/takeoff_land 流" % ",".join(failed))
+            ops.log("PANIC_INCOMPLETE", failed=failed)
+        else:
+            print(" PANIC COMPLETE — %d/%d 机降落指令确认送达"
+                  % (len(ids), len(ids)))
+            ops.log("PANIC_COMPLETE", ids=ids)
+        raise SystemExit(0 if ok else 1)
     if args.action == "preflight":
         raise SystemExit(ops.preflight(args.preflight_timeout))
     if args.action == "start":
@@ -410,6 +593,9 @@ def main():
         raise SystemExit(ops.start(args.force, mt))
     if args.action == "status":
         raise SystemExit(ops.status())
+    if args.action == "debug":
+        raise SystemExit(ops.debug_cli(args.debug_name, args.debug_args,
+                                       ids=args.ids))
     # takeoff / back / land：逐机命令
     ids = args.ids.split(",") if args.ids else ops.ids
     ok = ops.dispatch(args.action, ids=ids)

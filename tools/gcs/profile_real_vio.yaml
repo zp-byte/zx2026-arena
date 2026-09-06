@@ -1,8 +1,9 @@
-# GCS v0 profile — 真机 VIO（D435 + VINS-Fusion），每机一个 agent
+# GCS profile — 真机 VIO（D435 + VINS-Fusion），每机一个 agent
+# 部署: 拷到机载 ~/Diff-planner/tools/ 下, server 填地面站笔记本 IP
 profile: real_vio
 mode: real                    # 一级开关：real=起飞先行+POWER/FC 门+危险命令 --yes
                               # (hub 侧须加 --bat-min 30 才有 LOW_BAT 告警)
-server: 192.168.1.10:9870     # TODO 现场按地面站实际 IP 改
+server: 192.168.1.10:9870     # TODO(联调日第一件事) 现场按地面站实际 IP 改
 send_hz: 5.0
 ids: [0]                      # 单 agent 带本机: 写 [DRONE_ID] 的值
 topics:
@@ -19,23 +20,55 @@ topics:
   stage: null                 # 真机无全局阶段机——READY 门走 "stage topic n/a" 分支
   grid: null                  # TODO 真机建图上屏: grid_map/occupancy 是 PointCloud2
                               #   (需独立适配器), 与仿真 OccupancyGrid 不同型
+  score: null                 # 真机无 scorekeeper——比分条显示 --
+  mission: null               # 真机任务指派 multipoint points.yaml 内部持有
 
-# GCS v0 第 2 步：操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
+# GCS 操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
 # 脚本语义（sh_files 源码核实）: takeoff/land = /px4ctrl/takeoff_land cmd 1/2；
 # back = /back_trigger；trigger(pub_trigger) = /move_base_simple/goal 一帧
 # PoseStamped 触发 multipoint 预设航点（points.yaml/flight_type 决定航点）。
 # 脚本为 zsh 且 source 相对路径 —— 必须 cd 工作空间根再执行。
-# TODO 现场核实: 机 IP 网段 + 目录大小写（ls -d ~/Diff*，手册写 Diff-Planner、
-#   实机曾见 Diff-planner）+ ssh 免密（建议 ssh-copy-id 发公钥，勿用 sshpass）。
+# ssh 三参数纪律: BatchMode=yes 免密失败即报错(不挂 15s 等 TTY 输密码——
+#   subprocess 无 TTY 根本输不了)、ConnectTimeout=5 断网快败、
+#   StrictHostKeyChecking=accept-new 首连不卡 known_hosts 确认
+#   (accept-new 需地面站 OpenSSH>=7.6; Ubuntu 20.04 自带 8.2 满足,
+#   老机器兜底=ssh-keyscan 预灌 known_hosts 后去掉该参数)。
+# TODO(联调日) 核实: 机 IP 网段 + ssh-copy-id 发公钥（勿用 sshpass）。
+#   目录大小写已按实机证据定 Diff-planner（小写 p, 手册写错大写 P）——
+#   联调日仍跑 DEBUG 窗 ws 探针（ls -d ~/Diff*）一次复核。
+#   panic=逐机 ssh land，交付前必须 no-prop bench 实弹验证。
 ops:
   status_file: /home/ubuntu/zx2026_arena_ws/run_logs/gcs_status.json
   shell_prefix: ""
   cmds:
-    trigger: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/pub_trigger.sh'"
-    takeoff: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/takeoff.sh'"
-    back: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/back.sh'"
-    land: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/land.sh'"
-    panic: "ssh nv@192.168.1.10{id} 'cd ~/Diff-Planner && ./sh_files/land.sh'"
+    trigger: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/pub_trigger.sh'"
+    takeoff: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/takeoff.sh'"
+    back: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/back.sh'"
+    land: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/land.sh'"
+    panic: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/land.sh'"
+
+  # 真机调试接口（面板 DEBUG 窗 / `ops debug <名> [args]`）——约定只读，
+  # 写操作一律走上面 cmds（两段确认）。{args}=参数槽。
+  # source 用 devel/setup.sh（POSIX）而非 setup.bash——登录 shell 是
+  # zsh/bash 都通吃；远端命令含管道/重定向由 shlex.quote 整体保护。
+  debug_ssh: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id}"
+  debug_cmds:
+    ping: "echo ok && hostname && uptime"
+    ws: "ls -d ~/Diff* && ls ~/Diff-planner/sh_files/ | head"
+    ros: "cd ~/Diff-planner && source devel/setup.sh && rostopic list"
+    hz: "cd ~/Diff-planner && source devel/setup.sh && timeout 6 rostopic hz {args} -w 5 2>&1 | tee /dev/stderr | grep -q average"
+    echo: "cd ~/Diff-planner && source devel/setup.sh && timeout 6 rostopic echo -n 3 {args}"
+    node: "cd ~/Diff-planner && source devel/setup.sh && rosnode list | head -30"
+    proc: "pgrep -af 'ros|python|px4' | head -25"
+    res: "free -h | head -2 && df -h / | tail -1 && nvidia-smi --query-gpu=memory.used,temperature.gpu --format=csv,noheader"
+    log: "tail -n 30 {args}"
+
+  # preflight 真机探针（联调勘误自检，不阻断门）：依次跑 debug_cmds 里的命令。
+  # ros=远端 ROS 环境（免密+目录+source 链路）一并自检
+  probe:
+    - ping
+    - ws
+    - ros
   stagger_s: 2.0
   retries: 2
   execute_timeout_s: 600.0
