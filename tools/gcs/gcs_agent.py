@@ -130,16 +130,17 @@ class Agent(object):
 
     @staticmethod
     def _rle_grid(msg):
-        """OccupancyGrid → RLE 压缩字典（值域 0/100 → bit，游程 ≤255 分块）。
+        """OccupancyGrid → RLE 压缩字典（值域 0/1/2=空闲/占用/未知，游程 ≤255）。
 
         全场 0.5m 栅格 ~1.7 万格，林地图 RLE 后典型几百字节；base64 编码
         保持 JSON 行流 ascii 安全。快照专用通道（不进遥测 JSONL）。
+        未知(-1)单列一值：大图可区分"已探索空地"与"未探索"。
         """
         w, h = int(msg.info.width), int(msg.info.height)
         out = bytearray()
         prev, run = -1, 0
         for v in msg.data:
-            b = 1 if (v or 0) > 50 else 0
+            b = 1 if v > 50 else (2 if v < 0 else 0)
             if b == prev and run < 255:
                 run += 1
             else:
