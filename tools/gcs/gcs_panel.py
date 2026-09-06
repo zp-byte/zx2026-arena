@@ -22,16 +22,18 @@
 import os
 import sys
 import time
+from html import escape
 
 from collections import deque
 
 from PySide6.QtCore import QObject, QPointF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPainter, QPalette,
                            QPixmap, QPolygonF, QPen)
-from PySide6.QtWidgets import (QApplication, QDialog, QFrame, QGridLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QMainWindow,
-                               QMessageBox, QPlainTextEdit, QPushButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame,
+                               QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QLineEdit, QMainWindow, QMessageBox,
+                               QPlainTextEdit, QPushButton, QVBoxLayout,
+                               QWidget)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gcs_ops import STAGES, Ops  # noqa: E402
@@ -85,8 +87,11 @@ class Worker(QThread):
         try:
             ok = self.fn()
         except Exception as e:  # 兜底: 工作线程不许带崩 UI
-            ok = False
-            print("worker exception: %s" % e)
+            # 异常文本必须经 done 信号回 UI——print 只进真 stdout，
+            # 面板用户永远看不见（ok=False 无原因）
+            self.done.emit(False, "exception: %s: %s"
+                           % (type(e).__name__, e))
+            return
         self.done.emit(bool(ok), "")
 
 
@@ -112,7 +117,8 @@ class Card(QFrame):
             v.addWidget(w)
         self.did = did
 
-    def set_state(self, d, link_ok, stall_on, pdead_on, bat_on=False):
+    def set_state(self, d, link_ok, stall_on, pdead_on, bat_on=False,
+                  score=None):
         # 数据过期=NO LINK（与 hub dash 同语义：不信 TCP/旧数据）
         ph = (d or {}).get("phase") if link_ok else None
         self.phase.setText(str(ph) if ph else "NO LINK")
@@ -127,11 +133,13 @@ class Card(QFrame):
         bat = d.get("bat") if d else None
         pa = d.get("plan_age") if d else None
         age = d.get("age") if d else None
-        self.meta.setText("bat %-4s plan %-6s age %-5s"
+        sc_v = score.get("score") if score else None
+        self.meta.setText("bat %-4s plan %-6s age %-5s 分 %-4s"
                           % ("%.0f%%" % bat if bat is not None else "--",
                              "%.1f" % pa if pa is not None and pa >= 0
                              else "never",
-                             "%.1f" % age if age is not None else "--"))
+                             "%.1f" % age if age is not None else "--",
+                             str(sc_v) if sc_v is not None else "--"))
         badges = []
         if not link_ok:
             badges.append("LINK")
@@ -435,12 +443,104 @@ class MapDialog(QDialog):
             % (res, gw, gh, 100.0 * occ_n / max(1, gw * gh)))
 
 
+class DebugDialog(QDialog):
+    """真机 ssh 调试窗（真机调试接口的 UI 面）：选机+选命名调试命令
+    （profile ops.debug_cmds），stdout 回显进文本窗。
+
+    约定只读：debug_cmds 只放查看类命令（ros/hz/proc/res/log）；
+    一切写操作走正式命令层（real 两段确认），调试窗不给写通道。
+    """
+
+    def __init__(self, panel):
+        super().__init__()
+        self.panel = panel
+        self.running = False
+        self.setWindowTitle("fei tu A GCS - vehicle debug (ssh)")
+        self.resize(760, 480)
+        v = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.combo_d = QComboBox()
+        for did in panel.ops.ids:
+            self.combo_d.addItem("d%s" % did, did)
+        self.combo_c = QComboBox()
+        for name in sorted(panel.ops.debug_cmds):
+            self.combo_c.addItem(name)
+        self.args_ed = QLineEdit()
+        self.args_ed.setPlaceholderText("{args} 参数（无需则空）")
+        self.run_b = QPushButton("RUN")
+        self.run_b.clicked.connect(self.run)
+        row.addWidget(self.combo_d)
+        row.addWidget(self.combo_c)
+        row.addWidget(self.args_ed, 1)
+        row.addWidget(self.run_b)
+        v.addLayout(row)
+        self.hint = QLabel(
+            "只读约定: debug_cmds 仅查看类命令；写操作走命令层（两段确认）。"
+            "命令集在 profile ops.debug_cmds 配置。")
+        self.hint.setStyleSheet("color: %s;" % YEL)
+        self.hint.setWordWrap(True)
+        v.addWidget(self.hint)
+        self.out = QPlainTextEdit()
+        self.out.setReadOnly(True)
+        self.out.setMaximumBlockCount(800)
+        v.addWidget(self.out, 1)
+        self.stream = SignalStream()
+        self.stream.text.connect(self.out.appendPlainText)
+
+    def run(self):
+        if self.running or not self.panel.ops.debug_ssh:
+            return
+        # 互斥：与面板命令共享 ops 实例和 redirect_stdout（进程级全局，
+        # 并发=输出串流）——面板忙时不给开跑；反过来面板命令侧也拒绝
+        # 调试运行中触发（PANIC 豁免，急停不排队）
+        if self.panel.busy:
+            self.out.appendPlainText("[DBG] 面板命令执行中 — 稍后再试")
+            return
+        if not self.combo_c.currentText():
+            self.out.appendPlainText("[DBG] profile 未配置 ops.debug_cmds")
+            return
+        self.running = True
+        self.run_b.setEnabled(False)
+        # 调试运行期间占住面板忙位（PANIC 仍可用——急停永不设障）
+        self.panel.busy = True
+        self.panel._set_buttons(False)
+        did = self.combo_d.currentData()
+        name = self.combo_c.currentText()
+        cargs = self.args_ed.text().strip() or None
+        ops = self.panel.ops
+
+        def fn():
+            import contextlib
+            with contextlib.redirect_stdout(self.stream):
+                try:
+                    # debug_cli 返回 int rc（0/1/2）——必须显式 ==0，
+                    # bool(rc) 会把成功(0)报成 False、失败报成 True
+                    return ops.debug_cli(name, cargs, ids=[str(did)]) == 0
+                except Exception as e:
+                    print("debug exception: %s: %s" % (type(e).__name__, e))
+                    return False
+
+        self.w = Worker(fn)
+        self.w.done.connect(self._done)
+        self.w.start()
+
+    def _done(self, ok, msg):
+        self.running = False
+        self.run_b.setEnabled(True)
+        self.panel.busy = False
+        self.panel._set_buttons(True)
+        if msg:
+            self.out.appendPlainText("[DBG] %s" % msg)
+        self.out.appendPlainText("[DBG] finished ok=%s" % ok)
+
+
 class Panel(QMainWindow):
     def __init__(self, ops, poll_ms=500, selftest=False):
         super().__init__()
         self.ops = ops
         self.selftest = selftest
         self.busy = False
+        self._workers = []  # 运行中/已完成 Worker 的强引用（防 GC 杀线程）
         self._fired = False  # selftest 自动 START 只发一次（实例级）
         self.panic_armed_t = 0.0
         self.armed = None    # real 两段确认：当前 armed 的命令名
@@ -489,6 +589,13 @@ class Panel(QMainWindow):
             gates_box.addWidget(lbl)
         root.addLayout(gates_box)
 
+        # 比分/任务指派条（agent 采 scorekeeper latched 话题 → hub 快照；
+        # real 无 scorekeeper 显示 --）
+        self.score_lbl = QLabel("SCORE --")
+        self.score_lbl.setTextFormat(Qt.RichText)
+        self.score_lbl.setStyleSheet("color: %s;" % TXT)
+        root.addWidget(self.score_lbl)
+
         # 六格卡片
         grid = QGridLayout()
         self.cards = {}
@@ -503,6 +610,7 @@ class Panel(QMainWindow):
         self.last_drones = {}
         self.trails = {}      # did -> deque[(x, y, t)] 轨迹尾迹（地图窗用）
         self._map_dlg = None
+        self._dbg_dlg = None  # 真机 ssh 调试窗（真机专用，sim 置灰）
 
         # 指令按钮排（空模板=禁用置灰：不可达命令不给点）
         btns = QHBoxLayout()
@@ -535,6 +643,16 @@ class Panel(QMainWindow):
         self.map_btn.setToolTip("六机自建栅格地图（view-only，不依赖命令模板）")
         self.map_btn.clicked.connect(self.toggle_map)
         btns.addWidget(self.map_btn)
+        self.debug_btn = QPushButton("DEBUG")
+        self.debug_btn.setEnabled(ops.debug_ssh is not None)
+        if ops.debug_ssh:
+            self.debug_btn.setToolTip(
+                "真机 ssh 调试窗（ops.debug_cmds 命名只读命令）")
+        else:
+            self.debug_btn.setToolTip(
+                "profile 未配置 ops.debug_ssh — 真机专用，sim 置灰")
+        self.debug_btn.clicked.connect(self.toggle_debug)
+        btns.addWidget(self.debug_btn)
         root.addLayout(btns)
 
         # 日志窗
@@ -579,6 +697,17 @@ class Panel(QMainWindow):
             self._map_dlg.raise_()
             self._map_dlg.activateWindow()
 
+    def toggle_debug(self):
+        if not self.ops.debug_ssh:
+            self.append("[DEBUG] profile 未配置 ops.debug_ssh — 不可用")
+            return
+        if self._dbg_dlg is None or not self._dbg_dlg.isVisible():
+            self._dbg_dlg = DebugDialog(self)
+            self._dbg_dlg.show()
+        else:
+            self._dbg_dlg.raise_()
+            self._dbg_dlg.activateWindow()
+
     # ---- 500ms 轮询快照 -----------------------------------------------------
     def _trails_add(self, drones, now):
         """轨迹采样：>15m 跳变=重启/重定位，清旧迹防跨场拉线。"""
@@ -590,6 +719,41 @@ class Panel(QMainWindow):
             if tr and abs(p[0] - tr[-1][0]) + abs(p[1] - tr[-1][1]) > 15.0:
                 tr.clear()
             tr.append((p[0], p[1], now))
+
+    @staticmethod
+    def _si(v):
+        """分值强转防御：畸形 hub 透传值炸 poll 槽=面板静默冻结。"""
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _set_score(self, sc, ms):
+        """比分/任务指派条：d0 TYPE_A→P3 10分 汇总（real 无 scorekeeper=--）。
+
+        富文本标签——所有插值字段过 escape（hub/agent 侧数据不上 HTML）。"""
+        if not sc and not ms:
+            self.score_lbl.setText("SCORE --  (sim: scorekeeper 触发后 latched)")
+            return
+        if sc:
+            tot = sum(self._si((s or {}).get("score")) for s in sc.values())
+            cor = sum(self._si((s or {}).get("correct")) for s in sc.values())
+            wrg = sum(self._si((s or {}).get("wrong")) for s in sc.values())
+            parts = ['<b>SCORE %d</b>' % tot, '正确 %d · 错 %d' % (cor, wrg)]
+        else:
+            parts = ["SCORE --"]
+        for did in self.ops.ids:
+            m = ms.get(did) or {}
+            s = sc.get(did)
+            if not m and not s:
+                continue
+            seg = "d%s %s→P%s" % (
+                did, escape(str((m.get("payload") or "?")[-1])),
+                escape(str(m.get("drop", "?"))))
+            if s:
+                seg += " <b>%d分</b>" % self._si(s.get("score"))
+            parts.append(seg)
+        self.score_lbl.setText("  |  ".join(parts))
 
     def poll(self):
         snap = self.ops.read_status()
@@ -604,6 +768,9 @@ class Panel(QMainWindow):
         drones = snap.get("drones", {})
         self.last_drones = drones
         self.grids = snap.get("grids") or {}
+        sc = snap.get("scores") or {}
+        ms = snap.get("missions") or {}
+        self._set_score(sc, ms)
         self._trails_add(drones, now)
         for did, card in self.cards.items():
             d = drones.get(did)
@@ -612,7 +779,8 @@ class Panel(QMainWindow):
             card.set_state(d, link_ok,
                            bool((d or {}).get("stall_on")),
                            bool((d or {}).get("pdead_on")),
-                           bool((d or {}).get("bat_on")))
+                           bool((d or {}).get("bat_on")),
+                           score=sc.get(did))
         res, _cur = self.ops.gates(snap)
         self._set_gates(res)
         # 事件流增量（去重：hub events 尾 50 条）
@@ -649,8 +817,12 @@ class Panel(QMainWindow):
 
     # ---- 命令 --------------------------------------------------------------
     def start_cmd(self, name, ids=None):
-        if self.busy:
+        if self.busy and name != "panic":
+            # 忙位拒绝必须可见（静默吞命令=操作员以为已下发）
+            self.append("[CMD] %s REFUSED — 另一命令/调试运行中" % name)
             return
+        # panic 豁免：命令/调试运行中急停照发（急停永不排队设障；
+        # 并发 redirect_stdout 只乱打印归属，不影响下发）
         self.busy = True
         self._set_buttons(False)
         ops = self.ops
@@ -660,9 +832,10 @@ class Panel(QMainWindow):
             with contextlib.redirect_stdout(self.stream):
                 return ops.dispatch(name, ids=ids)
 
-        self.w = Worker(fn)
-        self.w.done.connect(self.on_cmd_done)
-        self.w.start()
+        w = Worker(fn)
+        self._workers.append(w)  # 保引用——覆盖 self.w 会被 GC 杀运行中线程
+        w.done.connect(self.on_cmd_done)
+        w.start()
         self.append("[CMD] %s dispatched" % name)
 
     # ---- real 两段确认 ------------------------------------------------------
@@ -712,6 +885,7 @@ class Panel(QMainWindow):
     def start_flow(self):
         """real START = ops.start 全流程（门→错峰起飞→离地确认→触发→盯飞）。"""
         if self.busy:
+            self.append("[START] REFUSED — 另一命令/调试运行中")
             return
         self.busy = True
         self._set_buttons(False)
@@ -723,16 +897,19 @@ class Panel(QMainWindow):
             with contextlib.redirect_stdout(self.stream):
                 return ops.start(False, mt)
 
-        self.w = Worker(fn)
-        self.w.done.connect(self.on_cmd_done)
-        self.w.start()
+        w = Worker(fn)
+        self._workers.append(w)  # 保引用——覆盖 self.w 会被 GC 杀运行中线程
+        w.done.connect(self.on_cmd_done)
+        w.start()
         self.append("[START] real flow: gates->takeoff->airborne->trigger"
                     "->monitor")
 
-    def on_cmd_done(self, ok, _msg):
+    def on_cmd_done(self, ok, msg):
         self.busy = False
         self._set_buttons(True)
         self._fired = True  # selftest 只自动触发一次
+        if msg:
+            self.append("[CMD] %s" % msg)
         self.append("[CMD] finished ok=%s" % ok)
 
     def on_panic(self):
