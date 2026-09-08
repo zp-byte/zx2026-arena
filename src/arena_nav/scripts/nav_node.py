@@ -30,6 +30,56 @@ from zx2026_common.scene import Scene
 from arena_nav.astar import AStar
 
 
+def vo_deflect(px, py, pz, vx, vy, drone_id, nj, nv,
+               engage_r, safe_r, t_pred, z_band):
+    """单邻居 VO-lite 判据与切向偏转方向（纯函数，无 ROS 依赖）。
+
+    W6 机间速度预测避撞的数学核心（tools/vo_selftest.py 离线复用）。
+    标准约定：p=邻居−自机（指向邻居），rv=邻居速度−自机速度；
+    闭合判据 p·rv<0，tcpa=−(p·rv)/|rv|²，CPA 相对位置 c=p+rv·tcpa，
+    dcpa=|c|。冲突 = 0<tcpa<t_pred 且 dcpa<safe_r 且水平距<engage_r
+    且 |dz|≤z_band（与 swarm 同门控：爬降段不干预）。
+
+    偏转方向：沿 rv 垂直单位向量 t̂，取推离 CPA 线的一侧——自机沿
+    s·t̂ 加速 → CPA 相对位 c−s·t̂·tcpa，|·| 增大取 s=−sign(c·t̂)。
+    镜像几何（两机互看）c 与 t̂ 同时反号 → c·t̂ 两机同号 → 同侧取号
+    → 世界系反向偏转（各向己右，相对分离率 2×push）；|c·t̂|≈0
+    （完全对头/纯追尾，sign 不稳定）固定 s=+1，两机同取 +t̂ 仍互补。
+    drone_id 仅进遥测，不进数学。
+    """
+    dz = nj[2] - pz
+    if abs(dz) > z_band:
+        return None
+    dx, dy = nj[0] - px, nj[1] - py
+    d = math.hypot(dx, dy)
+    if d < 1e-6 or d > engage_r:
+        return None
+    if nv is None:
+        return None
+    rvx, rvy = nv[0] - vx, nv[1] - vy
+    rv2 = rvx * rvx + rvy * rvy
+    if rv2 < 1e-6:
+        return None
+    pv = dx * rvx + dy * rvy
+    if pv >= 0.0:
+        return None                     # 正在远离，无冲突
+    tcpa = -pv / rv2
+    if tcpa > t_pred:
+        return None
+    cx, cy = dx + rvx * tcpa, dy + rvy * tcpa    # CPA 相对位置
+    dcpa = math.hypot(cx, cy)
+    if dcpa >= safe_r:
+        return None
+    inv = 1.0 / math.sqrt(rv2)
+    t1x, t1y = -rvy * inv, rvx * inv            # rv 左转 90° 单位向量
+    s1 = cx * t1x + cy * t1y
+    side = -1.0 if s1 > 0.0 else 1.0            # 推离 CPA 线（≈0 → +1）
+    w = (safe_r - dcpa) / safe_r
+    urg = 1.0 - min(tcpa / t_pred, 1.0)
+    score = w * (0.4 + 0.6 * urg)
+    return (side * t1x, side * t1y, score, tcpa, dcpa, d)
+
+
 class NavNode:
     def __init__(self):
         rospy.init_node("nav_node", anonymous=True)
@@ -276,6 +326,22 @@ class NavNode:
         self._swq_ramp = float(swq.get("ramp_s", 2.5))
         self._swq_until = -1e9     # 恢复爬坡重入截止时刻（de 退出时置 now+ramp）
 
+        # ---- W6 VO-lite 机间速度预测避撞（2026-09-07 d2/d3 返程互撞立案） ----
+        # 纯位置分离的反应距离不足之外层：TCPA/DCPA 预判汇聚冲突 + 相对速度
+        # 垂直切向偏转（数学核心=模块级纯函数 vo_deflect，selftest 离线验证）。
+        # 增量过 sep_obs_guard 投影（tag=vo）；救援态静默+ramp 与 coh/ali
+        # 同款（不改写逃逸矢量，硬推底线不动）；swarm z_band/min_z 门控；
+        # 邻居 age>stale_s 剔除。默认关；判词与翻线见 closed_loop.vo_avoid。
+        vo = cl.get("vo_avoid", {}) or {}
+        self._vo_enabled = bool(vo.get("enabled", False))
+        self._vo_engage_r = float(vo.get("engage_r", 3.5))
+        self._vo_safe_r = float(vo.get("safe_r", 1.1))
+        self._vo_t_pred = float(vo.get("t_pred", 3.0))
+        self._vo_gain = float(vo.get("gain", 1.2))
+        self._vo_max_push = float(vo.get("max_push", 1.0))
+        self._vo_stale_s = float(vo.get("stale_s", 0.5))
+        self._vo_hits = 0         # 触发计数（纯观测，不挂旗）
+
         # ---- 通信模型（邻居信息经无线链路：延迟/丢包由 comm_model_node 模拟） ----
         # enabled=false 时保持直连订阅 /drone_j/odom → 与今天逐位一致（零侵入）。
         cm = settings.get("comms", {})
@@ -284,10 +350,13 @@ class NavNode:
         self.neighbor_last = {}    # {j: 最近一次收到邻居 odom 的时间}（失联剪枝）
 
         # ---- P0 指标埋点（纯观测，不改行为；收集器 nav_metrics_node 落盘 run_logs/） ----
-        # Float32MultiArray 布局（11 项）：
+        # Float32MultiArray 布局（12 项；W6 追加只能加尾部——matrix_post 对
+        # ts.csv 按位置切片 r[3:14]，重排/插中会错位）：
         #   0 碰撞次数  1 卡滞累计s  2 卡滞段数  3 最长单段卡滞s  4 侧向翻转总数
         #   5 累计飞行距离m  6 全程最小clearance m  7 最大速度m/s  8 sim时间s
         #   9 当前速度m/s  10 当前clearance m（闭环才有值，其余 999）
+        #   11 飞行段最小机间距m（对邻居真值 odom 3D 距，z≥swarm_min_z 计，
+        #      world_node 仲裁同口径；垫段 ~1.5m 间距不计防锚死）
         self.metrics_enabled = bool(settings.get("nav", {}).get(
             "metrics", {}).get("enabled", True))
         self.m_col = 0
@@ -297,6 +366,7 @@ class NavNode:
         self.m_flip = 0
         self.m_dist = 0.0
         self.m_min_clear = 1e9
+        self.m_min_dclear = 1e9
         self.m_max_spd = 0.0
         self._m_prev_pos = None
         self._m_prev_t = None
@@ -328,11 +398,11 @@ class NavNode:
 
         self.last_plan_t = -1.0
         rospy.loginfo("nav_node: drone %d closed_loop=%s max_vel=%.1f cruise_z=%.1f "
-                      "tc=%s de=%s veto=%s metrics=%s soa=%s swg=%s swq=%s",
+                      "tc=%s de=%s veto=%s metrics=%s soa=%s swg=%s swq=%s vo=%s",
                       self.drone_id, self.closed_loop, self.max_vel, self.cruise_z,
                       self.tc_enabled, self._de_enabled, self._vt_enabled,
                       self.metrics_enabled, self._soa_enabled, self._swg_enabled,
-                      self._swq_enabled)
+                      self._swq_enabled, self._vo_enabled)
 
     # ---- callbacks ------------------------------------------------------------
     def _on_wind(self, msg):
@@ -1265,6 +1335,71 @@ class NavNode:
             cmd = cmd * (self.max_vel / vn)
         return cmd
 
+    # ---- W6 VO-lite 机间速度预测避撞（默认关，A/B 过线后翻） -------------------
+    def _apply_vo_avoid(self, cmd):
+        """TCPA/DCPA 预判汇聚冲突 + 相对速度垂直切向偏转（纯增量预测层）。
+
+        分离是纯位置反应（贴脸才推），反应窗 ~0.5s 不够返程对头汇聚
+        （d2/d3 互撞立案）；本层在分离上游用相对速度外推：对每个同高度带
+        邻居算 tcpa/dcpa，冲突（0<tcpa<t_pred 且 dcpa<safe_r 且水平距
+        <engage_r）时沿推离 CPA 线一侧给切向推力（⊥相对速度，一阶不减速
+        ——dam v2 教训：贴脸减速=延长暴露）。镜像几何两机推力天然反向
+        （各向己右，相对分离率 2×push；vo_selftest B 组不变量），无需
+        仲裁/奇偶定向。多邻居时取冲突分最高者生效（单推力防矢量打架）。
+        自机速度用 v_odom 实际值（与邻居 odom twist 同帧；comms 关直连时
+        镜像不变量严格成立，comms 开时 100-140ms 延迟使其在近零脱靶窗
+        退化为共模侧移——该窗由分离硬推层兜底，压力臂以 dclr/idcol 实测
+        判读）；邻居 age>stale_s 剔除（通信过期不预判）。
+        增量过 _sep_obs_guard（tag=vo，往树上推的分量被投影）；
+        救援态静默+恢复爬坡与 coh/ali 同款（不改写逃逸矢量）。
+        """
+        if not self._vo_enabled or self.odom[2] < self.swarm_min_z:
+            return cmd
+        if self._swq_enabled and (self._de_active or self._gs_active
+                                  or self._plan_fail_since is not None):
+            return cmd
+        quiet = 1.0
+        if self._swq_enabled:
+            now_q = rospy.get_time()
+            if now_q < self._swq_until:
+                quiet = max(0.0, 1.0 - (self._swq_until - now_q)
+                            / max(self._swq_ramp, 1e-6))
+        now = rospy.get_time()
+        best = None            # (score, ux, uy, tcpa, dcpa, d, j)
+        for j, nj in self.neighbors.items():
+            if now - self.neighbor_last.get(j, -1e9) > self._vo_stale_s:
+                continue
+            nv = self.neighbor_vel.get(j)
+            if nv is None:
+                continue
+            r = vo_deflect(self.odom[0], self.odom[1], self.odom[2],
+                           self.v_odom[0], self.v_odom[1], self.drone_id,
+                           nj, (nv[0], nv[1]),
+                           self._vo_engage_r, self._vo_safe_r,
+                           self._vo_t_pred, self.swarm_z_band)
+            if r is None:
+                continue
+            ux, uy, score, tcpa, dcpa, d = r
+            if best is None or score > best[0]:
+                best = (score, ux, uy, tcpa, dcpa, d, j)
+        if best is None:
+            return cmd
+        score, ux, uy, tcpa, dcpa, d, j = best
+        push = min(self._vo_gain * score, self._vo_max_push) * quiet
+        if push <= 0.0:
+            return cmd
+        pre = np.array(cmd) if self._soa_enabled else None
+        cmd[0] += ux * push
+        cmd[1] += uy * push
+        if pre is not None:
+            cmd = self._sep_obs_guard(cmd, pre, tag="vo")
+        self._vo_hits += 1
+        rospy.loginfo_throttle(
+            2.0, "vo_avoid: drone %d vs %d d=%.2f dcpa=%.2f tcpa=%.2f "
+                 "push=%.2f hits=%d",
+            self.drone_id, j, d, dcpa, tcpa, push, self._vo_hits)
+        return cmd
+
     def _sep_obs_guard(self, cmd, pre, tag="sep"):
         """分离/群集增量障碍投影：把增量中指向贴身障碍的分量投影掉（保切向）。
 
@@ -1538,6 +1673,23 @@ class NavNode:
             self.m_max_spd = spd
         if self._clr_now < self.m_min_clear:
             self.m_min_clear = self._clr_now
+        # 机间最小距离（P0 第 12 项，W6）：对邻居真值 odom 的 3D 距——
+        # world_node 互撞仲裁同口径（d<2×机半径 触发）。机不在点云里，
+        # min_clear 对机间失明由本项补上（d2/d3 互撞前无任何指标预警）。
+        # 只计飞行段（z≥swarm_min_z，与 VO 作用带一致）：起飞垫 ~1.5m 间距
+        # 会把全程最小值锚死在垫距、飞行段净空改善被削顶（对抗审查立项）。
+        if self.odom[2] >= self.swarm_min_z:
+            dmin = 1e9
+            for _nj in self.neighbors.values():
+                if _nj[2] < self.swarm_min_z:
+                    continue   # 邻居在起降段（垫上悬停 z≈1.5）不计——垫距锚定
+                _d = math.sqrt((_nj[0] - self.odom[0]) ** 2
+                               + (_nj[1] - self.odom[1]) ** 2
+                               + (_nj[2] - self.odom[2]) ** 2)
+                if _d < dmin:
+                    dmin = _d
+            if dmin < self.m_min_dclear:
+                self.m_min_dclear = dmin
         # 卡滞：未到 goal 且速度近乎为零（含碰撞冷却冻结——恢复开销也算卡滞）
         d_goal = float(np.linalg.norm(np.array(self.goal) - np.array(self.odom)))
         if d_goal > 0.4 and spd < 0.1:
@@ -1557,7 +1709,8 @@ class NavNode:
                 round(self.m_stuck_max, 2), float(self.m_flip),
                 round(self.m_dist, 2), min(self.m_min_clear, 999.0),
                 round(self.m_max_spd, 3), now, round(spd, 3),
-                min(self._clr_now, 999.0)]))
+                min(self._clr_now, 999.0),
+                min(self.m_min_dclear, 999.0)]))
 
     # ---- 主循环 -------------------------------------------------------------
     def run(self):
@@ -1586,6 +1739,7 @@ class NavNode:
             cmd = self._closed_loop_cmd()
             cmd = self._apply_swarm(cmd)
             cmd = self._apply_separation(cmd)
+            cmd = self._apply_vo_avoid(cmd)   # W6 VO-lite（默认关）
             cmd = self._apply_cloud_avoidance(cmd)
         else:
             if now - self.last_plan_t > 2.0:
@@ -1593,6 +1747,7 @@ class NavNode:
             cmd = self._god_mode_cmd()
             cmd = self._apply_swarm(cmd)
             cmd = self._apply_separation(cmd)
+            cmd = self._apply_vo_avoid(cmd)   # W6 VO-lite（默认关）
             cmd = self._apply_scene_avoidance(cmd)
 
         # 风前馈：顶风补偿（共享风 world 系水平分量；风关/非飞行期时值为 0 → 零侵入）

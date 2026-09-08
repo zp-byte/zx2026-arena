@@ -22,9 +22,13 @@ from std_msgs.msg import String, Float32MultiArray
 from zx2026_common import config as cfg
 from zx2026_common.scene import Scene
 
-# 与 nav_node __init__ 注释中的 11 项布局一一对应
+# 与 nav_node __init__ 注释中的 12 项布局一一对应。
+# 【W6 追加只能加尾部——matrix_post.py 对 ts.csv 按位置切片 r[3:14]，
+#   重排/插中会让历史行错位；末项=飞行段对邻居真值 odom 的 3D 最小距
+#   （z≥swarm_min_z 计，垫段 ~1.5m 间距不计防锚死）】
 FIELDS = ["collisions", "stuck_s", "stuck_n", "stuck_max_s", "flips",
-          "dist_m", "min_clear_m", "max_speed", "sim_t", "speed", "clear"]
+          "dist_m", "min_clear_m", "max_speed", "sim_t", "speed", "clear",
+          "min_drone_clear_m"]
 
 
 class NavMetrics(object):
