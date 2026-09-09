@@ -1,6 +1,6 @@
 # 智信2026 · 科目三仿真平台
 
-「智信—2026」竞技类科目三 **自主导航与障碍穿越** 的官方配套仿真平台：6 机集群在密林中自主穿越，将不同种类物品投放到类型匹配的投放点。基于 **ROS 1 Noetic**（Ubuntu 20.04），提供 **Python** 与 **Gazebo** 两个可插拔物理后端，评分/任务栈对后端透明。
+「智信—2026」竞技类科目三 **自主导航与障碍穿越** 的官方配套仿真平台：6 机集群在密林中自主穿越，机载侦察识别投放平台颜色后自主择点，将不同种类的物品精准投放到颜色匹配的平台并限时返航。基于 **ROS 1 Noetic**（Ubuntu 20.04），提供 **Python** 与 **Gazebo** 两个可插拔物理后端，评分/任务栈对后端透明。
 
 > 完整赛题、真机部署与算法分析见 `c:/Users/24882/Desktop/资料/非凸α_docs/` 下的《自主导航与障碍穿越_实验方案》系列文档。
 
@@ -12,7 +12,7 @@
 - **在线建图闭环导航（默认）**：lidar 点云 → 累积成全局持久占用栅格（SLAM 式，含滑窗剪枝与碰撞标记）→ 2.5D A* 重规划 → P 位置环。定位带随机游走漂移，导航只消费 `est_pose` 与自建地图，**不读场景真值**（真值 A* 保留为 god-mode 备胎：`closed_loop.enabled: false`）。
 - **反应层防御栈（W1-W5 稳健化战役产物）**：机间分离障碍护栏、云避障符号修复、返航塌缩卫兵、救援互斥、STALL 看门狗、退出迟滞——每个机制独立配置开关、A/B 矩阵验证后翻默认。
 - **6 机集群（Boids 速度层）**：分离 + 对齐 + 聚合（`swarm` 段，默认开）；静态编队 `formation.yaml` 退居备选、与群集互斥。
-- **类型匹配投放**：投放点视觉标识类型码与机载物类型匹配，匹配成功才触发投放。
+- **科目三比赛口径闭环（默认开）**：三桶（红/蓝/黄）无先验指派——机载侦察悬停扫描 → 颜色检测流 `bucket_select` 连续帧确认锁平台 → 精对准释放（真值 offset 0.07-0.38，判线 0.6）；S1 投放 60 + S2 限时降落 40 真计分；`rule_monitor` 退赛合规（出界/计划外落地/超高/返航走廊）。旗关逐位回退类型直配旧模式。
 - **地面站（GCS）**：机载 agent + 地面聚合 hub + 操作编排 + PySide6 面板 + 全局 PANIC 急停（六机同帧 ABORT）+ 六机合并建图态势图 + 比分/任务指派上屏 + 真机 ssh 调试窗（见下文 [GCS 三部曲](#gcs-三部曲toolsgcs)）。
 - **YAML 全配置**：场景拓扑 / 竞赛规则 / 机队 / 仿真参数全部 YAML 驱动，改配置无需重编译。
 
@@ -22,16 +22,16 @@
 
 | 包 | 职责 |
 |---|---|
-| `zx2026_common` | 共享消息（`Mission`/`Score`/`TaskUpdate`）、场景 AABB、几何/配置工具、YAML 配置 |
+| `zx2026_common` | 共享消息（`Mission`/`Score`/`TaskUpdate`）、场景 AABB、几何/配置工具、YAML 配置、纯函数三件套（`bucket_select` 颜色锁桶 / `rules` 退赛判定 / `scoring` 判桶计分） |
 | `arena_world` | Python 后端：运动学 + 碰撞 + TF + 时钟（`world_node`）、场景 Marker、启动/可视化 launch |
 | `arena_world_gazebo` | Gazebo 后端：`world_builder.py` 生成 `forest_world.world`、`drone_vel_plugin.cpp` 力控速度跟踪插件、`gazebo_collision_monitor` 碰撞事件源 |
 | `arena_fleet` | 机队管理（6 机注册、错峰调度） |
 | `arena_sensor` | 激光雷达模拟（`lidar_node`）、投放点 Tag 几何检测（`tag_detector_node`） |
 | `arena_nav` | 在线建图闭环导航（`nav_node.py`：占用栅格累积 + 2.5D A*（`astar.py`）+ P 位置环 + 反应层防御栈） |
-| `arena_mission` | 任务状态机（`mission_executor_node`）、任务生成、类型匹配、投放模拟、阶段控制 |
-| `arena_score` | 计分（`scorekeeper_node`） |
+| `arena_mission` | 任务状态机（`mission_executor_node`：RECON 闭环侦察→锁平台→对准释放→返航落地）、任务生成、类型匹配（fallback）、投放模拟、阶段控制 |
+| `arena_score` | 计分（`scorekeeper_node`：S1 真值判桶 + S2 落地阶梯 + 封卷语义）、退赛合规监视（`rule_monitor_node`） |
 
-工具：`tools/` 下有各战役的自检/矩阵脚本（`w5_selftest.py`、`w5_matrix_run.py` 等）与 `tools/gcs/` 地面站全家桶、`tools/fleet_monitor.py` 机群实时监测。
+工具：`tools/` 下有各战役的自检/矩阵脚本（`w5_selftest.py`、`w5_matrix_run.py` 等）、科目三回归链（`matrix_rule_run.py` 3-seed 矩阵 / `rule_selftest.py` 离线自检 / `baseline_rules0.py` 基线冻结）与 `tools/gcs/` 地面站全家桶、`tools/fleet_monitor.py` 机群实时监测。
 
 ---
 
@@ -92,9 +92,23 @@ bash tools/viz_run.sh                 # 推荐（WSLg 软渲染）
 bash run_verify.sh
 ```
 
-自动完成：清旧进程 → 启动全栈 → 等待节点就绪 → 跑 `verify_run.py`（150s 全流程）→ 校验 **6/6 阶段 DONE、6/6 类型匹配 MATCH、0 碰撞**。参考满分 **158**（110 基础类型分 + 48 路径质量奖励）。
+自动完成：清旧进程 → 启动全栈 → 等待节点就绪 → 跑 `verify_run.py`（**180s 比赛口径**；真机 25min=1500s，部署前改回 `competition_rules.yaml → time_limit_s`）→ 校验 **state DONE 封卷落盘、零退赛、≥1 机落地**（六机全 DONE 为 FULL 档对照）。**满分 100 = S1 投放 60 + S2 限时降落 40**；当前状态：**3-seed 矩阵全满分 100、landed=6、col=0、done≈155s**。
 
-> **同 seed 方差纪律**：单 run PASS/FAIL 有随机方差（W4 族冻结为小概率事件），机制 A/B 必须用 `tools/w5_matrix_run.py` 式同 seed 矩阵 + 触发日志证据判定，禁止单局定论。
+> **同 seed 方差纪律**：单 run PASS/FAIL 有随机方差（W4 族冻结为小概率事件），机制 A/B 必须用同 seed 矩阵（`tools/matrix_rule_run.py` / `tools/w5_matrix_run.py`）+ 触发日志证据判定，禁止单局定论。
+
+---
+
+## 科目三比赛口径链（默认全开）
+
+计分 `S = S1 + S2`（满分 100，`competition_rules.yaml → score`）：**S1** 每箱正确投放对应颜色平台 +10、队级封顶 60（scorekeeper 真值快照判线 0.6m，不随机载漂移）；**S2** 时限内返回起降区落地阶梯（6→40 / 5→30 / … / 1→5）。错投/偏投 0 分不倒扣。
+
+**三桶闭环侦察**（`color_id` 段）：任务**不**指派平台。executor `RECON` 子阶段逐平台 GOTO_HI→GOTO_LO 分级下降（中继层防 P 环过冲触盘）→ 悬停 dwell 采集 `/detected/color` → `bucket_select` 连续 n 帧置信达标锁平台 → AT_DROP 精对准释放。同色双机同平台由让位仲裁（`_low_occupant` + WAIT_HI 散点等待位，出 sep 1.5m 场）串行化。
+
+**到位链（P0-1/P0-2 法证产物）**：水平律驱动 est 系、真值停拉圈是真值帧——到位信号必须与控制环同帧：`/nav/arrived` = **真值停拉圈 fired ∨ est 伺服锁**；SCAN 入场 settle 窗（0.8s 内 xy 极差 <0.10）+ arrive_gate 双门防抖。末段去量化：前瞻航点到路径末端且 est 距 goal <1.5 格时直指 goal——cell 中心量化残差 ~0.35 是释放骑线根因；**len1 路径（start 格==goal 格）必须进伺服分支**——`len>=2` 门槛会把 goal 点落在 cell 角上的机冻死 30-48s（`gpath=len1 + cmd=0.000` 悬置签名，run23 法证）。
+
+**退赛合规**（`rule_monitor_node`）：出界 geofence 超时 / 计划外贴地 / 超高 / 返航走廊偏离 → RETIRE（S1 保留、S2 剔除，`retire_score_keep`）；touchdown 判定走 `landing_armed` 门（armed 生存期严格限定末段下降）；注入后门 `rule.selftest_inject` 默认关。
+
+**回归链**：`python3 tools/rule_selftest.py`（离线 43 断言）→ `bash run_verify.sh`（单局）→ `python3 tools/matrix_rule_run.py`（3 seeds × 全旗栈，过线门 = verdict/col/landed/retired/s1/minclr/stuck/done_t 八门）。
 
 ---
 
@@ -205,11 +219,11 @@ python3 tools/gcs/gcs_ops.py --profile tools/gcs/profile_sim.yaml start &
 | 文件 | 内容 |
 |---|---|
 | `scene_topology.yaml` | 场景（密林/穿越区/投放点/起降区/围栏）拓扑 |
-| `competition_rules.yaml` | 评分细则、高度约定、阶段时限、错峰间隔、类型匹配策略 |
+| `competition_rules.yaml` | 评分细则（S1/S2）、高度约定、阶段时限、错峰间隔、三桶闭环（`color_id`）与退赛合规（`rule`） |
 | `fleet.yaml` | 机队（6 机）配置 |
 | `sim_settings.yaml` | 仿真参数（nav / closed_loop / swarm / collision recovery 各段，每个机制独立开关） |
 
-类型分值：`TYPE_A=10 … TYPE_E=30`，详见 `competition_rules.yaml` 的 `score` 段。
+比赛计分与开关：S1/S2 细则见 `competition_rules.yaml` 的 `score` 段；`color_id`（三桶闭环）与 `rule`（退赛合规）段默认全开，`enabled: false` 逐位回退旧模式。
 
 ---
 
