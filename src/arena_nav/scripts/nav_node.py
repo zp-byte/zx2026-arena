@@ -27,6 +27,7 @@ from sensor_msgs.msg import PointCloud2
 
 from zx2026_common import config as cfg
 from zx2026_common.scene import Scene
+from zx2026_common.msg import TaskUpdate
 from arena_nav.astar import AStar
 
 
@@ -102,6 +103,18 @@ class NavNode:
         self.closed_loop = bool(cl.get("enabled", False))
         self.drift_rate = float(cl.get("drift_rate", 0.02))
         self.drift_max = float(cl.get("drift_max", 0.3))
+        # ---- 到位停拉圈按高度特化（P0-1 释放 offset 骑线，run13/14 法证） ----
+        # 停拉圈 0.4 内均匀随机停点 + 漂移 = 释放 offset 0.26-0.58 分布的真身；
+        # goal z 低于 low_z_max（drop 悬停 0.8 / touchdown 0.12 等精确任务段）
+        # 收紧到 low_z 圈：停点贴近 goal，真值 offset 收敛到 ~|漂移| 下界。
+        # 漂移把估计推出小圈时 nav 重启小修正（良性抖动趋真），不会躺平。
+        self._arrive_tol = float(cl.get("arrive_tol", 0.4))
+        self._arrive_tol_low_z = float(cl.get("arrive_tol_low_z", 0.15))
+        self._arrive_tol_low_z_max = float(cl.get("arrive_tol_low_z_max", 1.5))
+        # 伺服收敛信号圈（est 系 xy）：goal_reached 广播用。水平控制律驱动
+        # est 系，平衡点 est=goal——此圈判"控制环已收敛"（cmd≈0 零爬行），
+        # 与真值停拉圈（arrive_tol，odom 系）分工：后者只拦漂移小的幸运情形
+        self._arrive_tol_est = float(cl.get("arrive_tol_est", 0.10))
         # ---- 漂移感知裕度（2026-08-31 碰撞法证：低速贴树挤入 = est 系控制误差） ----
         # 点云是真值系（lidar 真值位姿 raycast），clearance 测量无偏；但控制几何
         # 在 est 系（est=truth+drift），漂移背向最近障碍时 est 距离比真值大
@@ -120,6 +133,8 @@ class NavNode:
         self._nstop_enabled = bool(nsz.get("enabled", False))
         self._nstop_zone_r = float(nsz.get("zone_r", 1.0))
         self._nstop_deadband = float(nsz.get("deadband", 0.2))
+        # scale_min：衰减钳位下限——归 0 会冻结末段收敛（run7 法证①）
+        self._nstop_scale_min = float(nsz.get("scale_min", 0.25))
         # ---- W3 塌缩卫兵（返航冻结：前瞻航点=自身 → 指令≈0 伺服自锁） ----
         cg = cl.get("collapse_guard", {}) or {}
         self._cg_enabled = bool(cg.get("enabled", False))
@@ -196,6 +211,7 @@ class NavNode:
         self._plan_fail_since = None   # 规划连续失败起点（末次有效路径保持期间计时）
         self._de_ok_t0 = None          # 退出迟滞：规划连续成功起点（None=未在成功中）
         self._stall_t0 = None          # 停滞看门狗起点（诊断日志用）
+        self._stuck_t0 = None          # 平台邻域卡死诊断起点（run18 立案）
 
         # ---- 恢复链路仲裁（2026-09-02 drone5 级联法证后的修复对） ----
         # M1 救援互斥：de 逃逸进行中或规划连续失败期间 goal-seal 盲推禁发
@@ -378,10 +394,35 @@ class NavNode:
                                                Float32MultiArray, queue_size=5)
 
         self.pub_vel = rospy.Publisher(ns + "/vel_cmd", Twist, queue_size=10)
+        # 真值到位信号（P0-1 第三刀）：goal_reached 是 nav 的停拉判据（真值
+        # norm<cur_arrive_tol），广播给 mission 层做 SCAN 入场/释放门——释放点
+        # 语义与判分（真值）对齐，漂移只影响门时机不影响释放点。纯观测话题，
+        # 消费端（executor arrive_gate）默认开、可关。
+        self.pub_arrived = rospy.Publisher(ns + "/nav/arrived", Bool,
+                                           queue_size=1, latch=True)
         rospy.Subscriber(ns + "/odom", Odometry, self._on_odom)
         rospy.Subscriber(ns + "/planning/goal", PoseStamped, self._on_goal)
         # 碰撞事件两模式都订阅：闭环用于注入占用，P0 指标用于计数
         rospy.Subscriber(ns + "/collision", Bool, self._on_collision)
+        # 真落地门控（与 world_node collides skip_ground 同语义）：armed=
+        # 最后下降段，贴地 vz 下限豁免——否则与 touchdown_z 下降对抗，
+        # 平衡在 z≈0.4 悬停永不落地（P4 验证实证）
+        self.landing_armed = False
+        rospy.Subscriber(ns + "/mission/landing_armed", Bool, self._on_landing_armed)
+        # 着陆终态机退出控制/分离场（run8 法证）：pads 同排间距 1.5m <
+        # 分离作用半径，已落地机仍在 Boids 分离场——后降机被托在
+        # z≈0.35-0.41 永不达 touchdown 判据 0.27（d1 armed×3 卡 70s+），
+        # 先降机被托离地面（d0 0.05→0.78）。LANDED/DONE=真落地：自己
+        # 停控（一次性零速——断流后 world cmd_vel 保持末值须显式归零）
+        # 并从他机分离场剔除；RETIRED/FAILED/ABORT=悬停锁定，保留在场。
+        # 旗 closed_loop.halt_on_landed（默认开）。
+        cl = settings.get("closed_loop", {}) or {}
+        self._halt_on_landed = bool(cl.get("halt_on_landed", True))
+        self._halted = False
+        self._landed_fleet = set()
+        if self._halt_on_landed:
+            rospy.Subscriber("/zx2026/task_update", TaskUpdate,
+                             self._on_task_update)
         if self.closed_loop:
             rospy.Subscriber(ns + "/cloud", PointCloud2, self._on_cloud)
             self._collision_obs = set()  # 碰撞标记：绕过 footprint clearing 的占用格
@@ -417,6 +458,8 @@ class NavNode:
         self.v_odom = np.array([v.x, v.y, v.z])
 
     def _on_neighbor(self, j, msg):
+        if j in self._landed_fleet:
+            return   # 已落地机退出感知（防 odom 流把剔除项填回分离场）
         p = msg.pose.pose.position
         self.neighbors[j] = (p.x, p.y, p.z)
         v = msg.twist.twist.linear
@@ -431,6 +474,30 @@ class NavNode:
         if self.closed_loop and self.tc_enabled:
             self._path_force = True   # 粘滞模式下立即重选路径奔新 goal
         self._replan()
+
+    def _on_landing_armed(self, msg):
+        self.landing_armed = bool(msg.data)
+
+    def _on_task_update(self, msg):
+        """着陆终态机退出控制/分离场（halt_on_landed，run8 法证）。
+
+        LANDED/DONE=真落地（executor disarm）：自己停控+从全部机的
+        分离场剔除；RETIRED/FAILED/ABORT=悬停锁定仍在空中，保留在场。
+        """
+        if msg.mission_state not in ("LANDED", "DONE"):
+            return
+        i = int(msg.drone_id)
+        if i == self.drone_id:
+            if not self._halted:
+                self._halted = True
+                self.pub_vel.publish(Twist())   # 一次性零速
+                rospy.loginfo("nav_node: drone %d landed, halt control",
+                              self.drone_id)
+        else:
+            self._landed_fleet.add(i)
+            self.neighbors.pop(i, None)
+            self.neighbor_vel.pop(i, None)
+            self.neighbor_last.pop(i, None)
 
     def _on_collision(self, msg):
         """收到碰撞事件 → 把碰撞点强行注入占用栅格，绕过 footprint clearing。
@@ -641,21 +708,31 @@ class NavNode:
         return max(0.0, best - ero), ero
 
     def _nstop_scale(self):
-        """近停区地板衰减系数：距 goal<zone_r 线性衰减，deadband 处归 0。
+        """近停区地板衰减系数：距 goal<zone_r 线性衰减，钳到 scale_min。
 
         治 2026-08-31 法证的挤压机制：vcap 地板 0.35 贴脸仍保底 0.53m/s，
         前推力把平衡点压进真值接触。仅作用于非 dam 分支的地板（dam 开时以
         dam 衰减为准，二者不同开）。flag 关 / de 逃逸中 / goal 缺失 → 1.0
         （逐位原行为）。
+        run7 法证两处修订：
+        ① deadband 处归 0 会把 vcap 压到 0（贴地 clearance/2≈0）→ 下降
+          冻结在 touchdown 阈值上方（d1 卡 z=0.31 70s+）/ 平台上空收敛卡死腿
+          超时（d5 COLOR_UNRESOLVED）——P2 scale→0 磨树同类病灶。
+          修：钳 scale_min（0.25→保底速度 ~0.13m/s，末段 0.2m 约 1.5s 收口，
+          平台上空沉深 0.06m 级）。
+        ② armed（计划降落窗口）不衰减：touchdown 目标本就贴地，需满速下降。
         """
         if not self._nstop_enabled or self._de_active or self.goal is None:
+            return 1.0
+        if self.landing_armed:
             return 1.0
         dg = math.hypot(self.odom[0] - self.goal[0],
                         self.odom[1] - self.goal[1])
         if dg >= self._nstop_zone_r:
             return 1.0
         span = max(1e-6, self._nstop_zone_r - self._nstop_deadband)
-        return max(0.0, min(1.0, (dg - self._nstop_deadband) / span))
+        return max(self._nstop_scale_min,
+                   min(1.0, (dg - self._nstop_deadband) / span))
 
     @staticmethod
     def _dilate_rect(occ, k):
@@ -757,9 +834,20 @@ class NavNode:
             return None
         return self._grid_astar(occ, s, alt)
 
+    def _cur_arrive_tol(self):
+        """到位停拉圈：goal z 低于 low_z_max（精确任务段）用收紧圈。
+
+        注意方法名不能叫 _arrive_tol——L111 的同名 float 属性会遮蔽方法
+        （run15 全瘫根因：'float' object is not callable）。
+        """
+        return (self._arrive_tol_low_z
+                if self.goal[2] < self._arrive_tol_low_z_max
+                else self._arrive_tol)
+
     def _closed_loop_cmd(self):
         # 已到位（真值判定）：停住，等 mission 换 goal
-        if np.linalg.norm(np.array(self.goal) - np.array(self.odom)) < 0.4:
+        if np.linalg.norm(np.array(self.goal) - np.array(self.odom)) \
+                < self._cur_arrive_tol():
             return np.zeros(3)
 
         # 周期重建全局栅格（点云累积建图，视野覆盖全场，保持 0.5s 新鲜度）
@@ -845,7 +933,14 @@ class NavNode:
             # P3 逃逸中：沿评分方向慢速驶出（垂直/限速/反应层照常生效）
             cmd = np.array([self._de_dir[0] * self._de_speed,
                             self._de_dir[1] * self._de_speed, 0.0])
-        elif self._gpath is not None and len(self._gpath) >= 2:
+        elif self._gpath is not None and len(self._gpath) >= 1:
+            # P0-2（run23 法证）：len>=2 → len>=1。start 格==goal 格时规划器
+            # 返回 1 格路径，旧条件把它落进"无路径悬停"分支 cmd=0——goal 点
+            # 在 cell 角上时停点离 goal 可达 0.5-0.7，arrived 永假，平台腿
+            # 冻结 30-48s 超时（d3 @P3 48s/d1 @P2 10s/d0 35s 同签名：
+            # gpath=len1 + cmd=0.000 + horiz 冻结 + settled=True）。
+            # len1 时 best=0、k=0=len-1、est-goal<res 对角 0.707<0.75，
+            # 下方末段去量化直达分支必然接管，伺服正常收敛。
             ci, cj = self._g_to_cell(self.est_pos[0], self.est_pos[1])
             best = 0
             best_d = 1e18
@@ -855,6 +950,16 @@ class NavNode:
                     best_d, best = d, k
             k = min(best + lookahead, len(self._gpath) - 1)
             wx, wy = self._g_to_world(self._gpath[k][0], self._gpath[k][1])
+            # P0-1 末段去量化（run19/20 法证）：前瞻航点已到路径末端且 est 距
+            # goal 不足 1.5 格时直指 goal 本身——cell 中心量化残差可达
+            # ~res/2*sqrt2≈0.35 > arrive_tol_est，伺服锁死在 cell 中心
+            # （cmd=0.000 + est 误差 ~0.3 + arrived=False 悬置签名），
+            # SCAN 入场门永不放行、平台腿 45s 超时。直达段 ≤0.75m 且
+            # 反应层（云避障/分离/vcap）照常兜底，与 GOAL-SEAL 直达同构。
+            if k == len(self._gpath) - 1 and \
+                    math.hypot(self.goal[0] - self.est_pos[0],
+                               self.goal[1] - self.est_pos[1]) < 1.5 * self.res:
+                wx, wy = self.goal[0], self.goal[1]
             cmd = np.array([np.clip(wx - self.est_pos[0], -2.0, 2.0),
                             np.clip(wy - self.est_pos[1], -2.0, 2.0),
                             0.0])
@@ -864,7 +969,9 @@ class NavNode:
 
         # 垂直：基于真值高度（气压/光流较准），向 goal z 收敛
         cmd[2] = np.clip((self.goal[2] - self.odom[2]) * 1.5, -1.0, 1.0)
-        cmd[2] = max(cmd[2], (0.5 + self.scene.venue["ground_z"] - self.odom[2]) * 1.0)
+        # 贴地 vz 下限（防误贴地）；armed=最后下降段真落地，豁免
+        if not self.landing_armed:
+            cmd[2] = max(cmd[2], (0.5 + self.scene.venue["ground_z"] - self.odom[2]) * 1.0)
 
         # 动态限速：点云最近障碍越近越慢（真实规划器遇障减速）
         # （clearance 每拍只算一次，P0 指标与 P1 锁定复用）
@@ -1720,7 +1827,10 @@ class NavNode:
             rate.sleep()
 
     def _tick(self):
+        if self._halted:
+            return   # 落地终态：零速已发，不再发布（世界侧 cmd_vel 保持零速）
         if not self.has_odom or self.goal is None:
+            self.pub_arrived.publish(Bool(data=False))
             return
         now = rospy.get_time()
         self._clr_now = 1e9   # 本拍 clearance 由闭环分支覆写（god-mode/到位段无值）
@@ -1762,6 +1872,27 @@ class NavNode:
         # 各形态死锁（flap 停滞/贴靠平衡/磨树）从此日志自证，不再靠trace反推。
         if self.closed_loop:
             d_goal = float(np.linalg.norm(np.array(self.goal) - np.array(self.odom)))
+            # 卡死成分诊断（run18 立案）：真值距 goal<1.5m 近零速 2s——平台
+            # 邻域悬停不收敛形态（远距 STALL diag 不覆盖 d_goal<1.0 段）。
+            # 打印 est/drift/路径/前后指令成分，一次跑定位平衡点由谁构成。
+            if d_goal < 1.5 and float(np.linalg.norm(self.v_odom)) < 0.15:
+                if self._stuck_t0 is None:
+                    self._stuck_t0 = now
+                elif now - self._stuck_t0 > 2.0:
+                    fail = (now - self._plan_fail_since
+                            if self._plan_fail_since is not None else -1.0)
+                    gp = "None" if self._gpath is None else "len%d" % len(self._gpath)
+                    rospy.loginfo_throttle(
+                        2.0, "nav_node: drone %d STUCK diag odom=(%.2f,%.2f,%.2f) "
+                        "goal=(%.2f,%.2f,%.2f) est=(%.2f,%.2f) drift=(%.2f,%.2f,%.2f) "
+                        "gpath=%s plan_fail=%.1f arrived=%s cmd=%.3f",
+                        self.drone_id, self.odom[0], self.odom[1], self.odom[2],
+                        self.goal[0], self.goal[1], self.goal[2],
+                        self.est_pos[0], self.est_pos[1],
+                        self.drift[0], self.drift[1], self.drift[2],
+                        gp, fail, self.goal_reached(), float(np.linalg.norm(cmd)))
+            else:
+                self._stuck_t0 = None
             if d_goal > 1.0 and float(np.linalg.norm(self.v_odom)) < 0.05:
                 if self._stall_t0 is None:
                     self._stall_t0 = now
@@ -1785,14 +1916,31 @@ class NavNode:
         tw = Twist()
         tw.linear.x, tw.linear.y, tw.linear.z = cmd[0], cmd[1], cmd[2]
         self.pub_vel.publish(tw)
+        self.pub_arrived.publish(Bool(data=self.goal_reached()))
         # P0 指标（纯观测）
         self._update_metrics(cmd, now)
 
     # ---- 到达查询（供 mission 使用） ----------------------------------------
     def goal_reached(self):
+        """到位信号 = 控制环已停的两种形态之或（P0-1 第三刀，run17/18/19 法证）。
+
+        形态一：真值停拉圈 fired（与 _closed_loop_cmd 首行零速判据同款同帧）
+        ——圈停即到位，平台低空圈 0.15 → 释放真值 offset ≤0.15。
+        形态二：est 系伺服锁（漂移大时真值圈到不了：水平律驱动 est 系，
+        真值停在 goal−drift，|drift|>圈 时形态一永假——run17/18 五机 SCAN
+        全超时根因）——est xy 误差 <arrive_tol_est 且 z 真值到位即认到达，
+        释放 offset=|drift| ≤0.3=本架构理论下界。
+        两形态覆盖全漂移域：offset ≤ min(圈, |drift|) 量级。
+        """
         if self.goal is None:
             return False
-        return np.linalg.norm(np.array(self.goal) - np.array(self.odom)) < 0.4
+        if np.linalg.norm(np.array(self.goal) - np.array(self.odom)) \
+                < self._cur_arrive_tol():
+            return True
+        xy_ok = math.hypot(self.goal[0] - self.est_pos[0],
+                           self.goal[1] - self.est_pos[1]) < self._arrive_tol_est
+        z_ok = abs(self.goal[2] - self.odom[2]) < self._cur_arrive_tol()
+        return xy_ok and z_ok
 
 
 if __name__ == "__main__":

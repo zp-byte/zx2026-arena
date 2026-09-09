@@ -37,6 +37,8 @@ class Agent(object):
         self.grids = {}    # did -> RLE 压缩占用栅格（第 4 步 ③：建图上屏）
         self.scores = {}   # did -> 比分明细（scorekeeper /zx2026/score/<id>）
         self.missions = {}  # did -> 任务指派（/zx2026/mission/<id>）
+        self.tasks = {}    # did -> 任务进度事件（/zx2026/task_update，LANDED/RETIRED）
+        self.score_total = None  # 赛末总分 dict（/zx2026/score_summary 解析）
         self.seq = 0
         self.tp = cfg["topics"]
         self.stage = None  # 全局阶段机（/zx2026/state），非 per-drone
@@ -78,15 +80,16 @@ class Agent(object):
         stp = self.tp.get("stage")
         if stp:
             rospy.Subscriber(stp, String, self._on_stage, queue_size=2)
-        # 比分/任务指派（sim scorekeeper latched；真机 profile 为 null 自动跳过；
-        # 车载无 zx2026_common 时仅告警降级，不影响其余采集）
-        if self.tp.get("score") or self.tp.get("mission"):
+        # 比分/任务指派/任务进度（sim scorekeeper latched；真机 profile 为 null
+        # 自动跳过；车载无 zx2026_common 时仅告警降级，不影响其余采集）
+        if self.tp.get("score") or self.tp.get("mission") or self.tp.get("task"):
             try:
                 from zx2026_common.msg import Mission as MissionMsg
                 from zx2026_common.msg import Score as ScoreMsg
+                from zx2026_common.msg import TaskUpdate as TaskMsg
             except ImportError:
                 rospy.logwarn("gcs_agent: zx2026_common.msg 不可用 — "
-                              "score/mission 采集降级关闭")
+                              "score/mission/task 采集降级关闭")
             else:
                 if self.tp.get("score"):
                     for i in self.ids:
@@ -98,6 +101,13 @@ class Agent(object):
                         rospy.Subscriber(self.tp["mission"].format(id=i),
                                          MissionMsg, self._on_mission, i,
                                          queue_size=1)
+                if self.tp.get("task"):
+                    rospy.Subscriber(self.tp["task"], TaskMsg,
+                                     self._on_task, queue_size=5)
+        # 赛末总分条（std_msgs/String latched，scorekeeper 赛毕发布）
+        susp = self.tp.get("summary")
+        if susp:
+            rospy.Subscriber(susp, String, self._on_summary, queue_size=2)
 
     def _on_odom(self, msg, i):
         p = msg.pose.pose.position
@@ -148,16 +158,44 @@ class Agent(object):
     def _on_score(self, msg, i):
         with self.lock:
             self.scores[i] = {"score": int(msg.score),
+                              "s1": int(getattr(msg, "s1", msg.score)),
                               "correct": int(msg.correct_drops),
                               "wrong": int(msg.wrong_drops),
-                              "state": str(msg.mission_state)}
+                              "state": str(msg.mission_state),
+                              "retire": int(getattr(msg, "retire_state", 0))}
 
     def _on_mission(self, msg, i):
         with self.lock:
             self.missions[i] = {"payload": str(msg.payload_type),
                                 "drop": int(msg.drop_point_id),
+                                "box_color": str(getattr(msg, "box_color", "")),
                                 "marker": str(msg.marker_id),
                                 "seq": int(msg.mission_seq)}
+
+    def _on_task(self, msg):
+        # 全局任务进度事件（LANDED/RETIRED 等）——S2 落地计数的实时来源
+        with self.lock:
+            self.tasks[str(msg.drone_id)] = {
+                "state": str(msg.mission_state),
+                "payload": str(msg.payload_type),
+                "drop": int(msg.drop_point_id),
+                "drop_ok": int(msg.drop_ok)}
+
+    def _on_summary(self, msg):
+        # scorekeeper 赛末总分条："total=.. s1=.. s2=.. landed=.. .. <path>"；
+        # 同话题的 per-drone 行无 total= 键，解析后自然丢弃
+        d = {}
+        for tok in str(msg.data).split():
+            if "=" not in tok:
+                continue
+            k, v = tok.split("=", 1)
+            try:
+                d[k] = int(v)
+            except ValueError:
+                pass
+        if "total" in d:
+            with self.lock:
+                self.score_total = d
 
     def _on_live(self, _msg, key):
         i, _k = key
@@ -232,6 +270,8 @@ class Agent(object):
         scores = {}
         missions = {}
         with self.lock:
+            tasks = dict(self.tasks)
+            total = dict(self.score_total) if self.score_total else None
             for i in self.ids:
                 st = self.state[i]
                 lt = st["live_t"]
@@ -256,6 +296,10 @@ class Agent(object):
                 out["scores"] = scores
             if missions:
                 out["missions"] = missions
+            if tasks:
+                out["tasks"] = tasks
+            if total:
+                out["score_total"] = total
         return out
 
 

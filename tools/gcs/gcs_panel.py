@@ -121,9 +121,11 @@ class Card(QFrame):
                   score=None):
         # 数据过期=NO LINK（与 hub dash 同语义：不信 TCP/旧数据）
         ph = (d or {}).get("phase") if link_ok else None
+        # 退赛（rule_monitor 合规条款）整卡标红——S2 已剔除，操作员必须看见
+        retired = bool(score and score.get("retire")) or ph == "RETIRED"
         self.phase.setText(str(ph) if ph else "NO LINK")
         self.phase.setStyleSheet(
-            "color: %s;" % (GRN if ph else RED))
+            "color: %s;" % (RED if (retired or not ph) else GRN))
         if d and d.get("pos"):
             p = d["pos"]
             self.info.setText("pos (%.1f, %.1f, %.1f)  v %.2f"
@@ -143,6 +145,8 @@ class Card(QFrame):
         badges = []
         if not link_ok:
             badges.append("LINK")
+        if retired:
+            badges.append("RETIRED")
         if stall_on:
             badges.append("STALL")
         if pdead_on:
@@ -151,7 +155,7 @@ class Card(QFrame):
             badges.append("BAT")
         self.alarm.setText(" ".join("[%-7s]" % b for b in badges))
         self.alarm.setStyleSheet("color: %s;" % (RED if badges else DIM))
-        border = RED if not link_ok else (YEL if badges else GRN)
+        border = RED if (not link_ok or retired) else (YEL if badges else GRN)
         self.setStyleSheet("QFrame#card { border: 2px solid %s; "
                            "border-radius: 8px; background: %s; }"
                            % (border, CARD_BG))
@@ -728,30 +732,53 @@ class Panel(QMainWindow):
         except (TypeError, ValueError):
             return 0
 
-    def _set_score(self, sc, ms):
-        """比分/任务指派条：d0 TYPE_A→P3 10分 汇总（real 无 scorekeeper=--）。
+    def _set_score(self, sc, ms, tk=None, tot=None):
+        """比分/任务指派条（比赛口径 S=S1+S2）：
+        S1 n | S2 n | 落 k/6 | 总 n ‖ d0 A●红→P1 ✓ (10分) [退赛]。
 
-        富文本标签——所有插值字段过 escape（hub/agent 侧数据不上 HTML）。"""
-        if not sc and not ms:
+        sc=scores ms=missions tk=task_update 事件 tot=赛末 summary（real 无
+        scorekeeper 显示 --）。富文本——所有插值字段过 escape（hub/agent
+        侧数据不上 HTML）。"""
+        if not sc and not ms and not tk and not tot:
             self.score_lbl.setText("SCORE --  (sim: scorekeeper 触发后 latched)")
             return
-        if sc:
-            tot = sum(self._si((s or {}).get("score")) for s in sc.values())
-            cor = sum(self._si((s or {}).get("correct")) for s in sc.values())
-            wrg = sum(self._si((s or {}).get("wrong")) for s in sc.values())
-            parts = ['<b>SCORE %d</b>' % tot, '正确 %d · 错 %d' % (cor, wrg)]
+        landed_n = sum(1 for t in (tk or {}).values()
+                       if str((t or {}).get("state")) == "LANDED")
+        if tot and "s2" in tot:
+            parts = ['<b>S1 %d</b>' % self._si(tot.get("s1")),
+                     '<b>S2 %d</b>' % self._si(tot.get("s2")),
+                     '落 %d/%d' % (self._si(tot.get("landed")),
+                                   len(self.ops.ids)),
+                     '<b>总 %d</b>' % self._si(tot.get("total"))]
         else:
-            parts = ["SCORE --"]
+            # 赛末 summary 未出（比赛进行中）：S1/落地数走实时源
+            s1 = sum(self._si((s or {}).get("s1", (s or {}).get("score")))
+                     for s in sc.values())
+            parts = ['S1 %d' % s1, 'S2 --',
+                     '落 %d/%d' % (landed_n, len(self.ops.ids)), '总 --']
         for did in self.ops.ids:
             m = ms.get(did) or {}
             s = sc.get(did)
-            if not m and not s:
+            t = (tk or {}).get(did) or {}
+            if not m and not s and not t:
                 continue
-            seg = "d%s %s→P%s" % (
-                did, escape(str((m.get("payload") or "?")[-1])),
-                escape(str(m.get("drop", "?"))))
+            # 指派段：d0 A●红→P1（箱色色卡来自 Mission.box_color）
+            ptype = str(m.get("payload") or "")
+            color = str(m.get("box_color") or "")
+            cname = {"red": "红", "blue": "蓝", "yellow": "黄"}.get(color, "")
+            ccol = {"red": RED, "blue": "#3498db",
+                    "yellow": YEL}.get(color, DIM)
+            seg = "d%s %s" % (did, escape(ptype[-1]) if ptype else "?")
+            if cname:
+                seg += '<span style="color:%s">●%s</span>' % (ccol, cname)
+            seg += "→P%s" % escape(str(m.get("drop", "?")))
+            st = str(t.get("state") or "")
+            if st == "RETIRED" or (s or {}).get("retire"):
+                seg += ' <span style="color:%s"><b>[退赛]</b></span>' % RED
+            elif st == "LANDED":
+                seg += ' <span style="color:%s">✓</span>' % GRN
             if s:
-                seg += " <b>%d分</b>" % self._si(s.get("score"))
+                seg += " <b>%d分</b>" % self._si(s.get("s1", s.get("score")))
             parts.append(seg)
         self.score_lbl.setText("  |  ".join(parts))
 
@@ -770,7 +797,8 @@ class Panel(QMainWindow):
         self.grids = snap.get("grids") or {}
         sc = snap.get("scores") or {}
         ms = snap.get("missions") or {}
-        self._set_score(sc, ms)
+        self._set_score(sc, ms, snap.get("tasks") or {},
+                        snap.get("score_total") or {})
         self._trails_add(drones, now)
         for did, card in self.cards.items():
             d = drones.get(did)

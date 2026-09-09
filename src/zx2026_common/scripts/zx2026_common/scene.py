@@ -54,13 +54,14 @@ class Zone:
 
 
 class DropPoint:
-    __slots__ = ("id", "xyz", "type_id", "marker")
+    __slots__ = ("id", "xyz", "type_id", "marker", "color")
 
-    def __init__(self, did, xyz, type_id, marker):
+    def __init__(self, did, xyz, type_id, marker, color=""):
         self.id = did
         self.xyz = tuple(xyz)
         self.type_id = type_id
         self.marker = marker
+        self.color = color  # 平台色（规则口径；缺省时回退 color_map）
 
 
 class DroneConfig:
@@ -102,9 +103,12 @@ class Scene:
                 by_id[z["id"]].polygon = target.polygon
         self.zones = by_id
 
-        # 投放点
+        # 投送平台（颜色权威源 color_map：TYPE→color，三端共用）
+        cm = self.scene_cfg.get("color_map", {}) or {}
+        self.color_map = {str(k): str(v) for k, v in cm.items()}
         self.drop_points = [
-            DropPoint(d["id"], d["xyz"], d["type_id"], d["marker"])
+            DropPoint(d["id"], d["xyz"], d["type_id"], d.get("marker", ""),
+                      d.get("color", self.color_map.get(d["type_id"], "")))
             for d in self.scene_cfg.get("drop_points", [])
         ]
         self.payload_types = list(self.scene_cfg.get("payload_types", []))
@@ -276,6 +280,23 @@ class Scene:
                 return d
         return None
 
+    def drop_point(self, did):
+        """按 id 查投送平台，未找到返回 None。"""
+        for dp in self.drop_points:
+            if dp.id == did:
+                return dp
+        return None
+
+    def color_for_type(self, type_id):
+        """补给类型 → 平台色（权威源 color_map；未知类型返回 ""）。
+
+        平台上带 color 时以平台为准（同类型多平台可异色），否则回退映射。
+        """
+        for dp in self.drop_points:
+            if dp.type_id == type_id and dp.color:
+                return dp.color
+        return self.color_map.get(type_id, "")
+
     def in_crossing_zone(self, p):
         """判断二维点 p=(x,y) 是否在穿越区内。"""
         if not self.crossing_zone:
@@ -293,11 +314,15 @@ class Scene:
         cy = sum(p[1] for p in poly) / n
         return (cx, cy)
 
-    def collides(self, pos, radius=None):
-        """球(pos, radius) 与任一障碍或地面碰撞。"""
+    def collides(self, pos, radius=None, skip_ground=False):
+        """球(pos, radius) 与任一障碍或地面碰撞。
+
+        skip_ground=True 跳过地面子句（真落地 touchdown 用：landing_armed
+        门控下的最后下降段；树/围栏/机间碰撞照查——armed 漏关放过不了
+        贴树碰撞）。"""
         radius = radius if radius is not None else self.drone_radius
         gz = self.venue["ground_z"]
-        if pos[2] - radius < gz:
+        if not skip_ground and pos[2] - radius < gz:
             return True
         for ob in self.obstacles:
             if ob.kind == "tree":

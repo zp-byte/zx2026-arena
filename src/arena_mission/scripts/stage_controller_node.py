@@ -71,6 +71,10 @@ class StageController:
         elif phase == "FAILED":
             self.mission_failed.add(i)
             self._check_all_done()
+        elif phase == "RETIRED":
+            # 比赛合规退赛（rule_monitor）：计终局（FAILED 计数不含 RETIRED）
+            self.mission_failed.add(i)
+            self._check_all_done()
 
     def _check_all_done(self):
         finished = self.mission_done | self.mission_failed

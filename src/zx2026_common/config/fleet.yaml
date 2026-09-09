@@ -7,6 +7,7 @@ drone_count: 6
 drone_radius: 0.35         # 碰撞球半径(m)
 
 drones:
+  # 规则口径：电池/药品/食品 3 类，每类 2 机（A,B,C,A,B,C）
   - drone_id: 0
     payload: TYPE_A
     sensor_range: 12.0
@@ -17,11 +18,11 @@ drones:
     payload: TYPE_C
     sensor_range: 12.0
   - drone_id: 3
-    payload: TYPE_D
+    payload: TYPE_A
     sensor_range: 12.0
   - drone_id: 4
-    payload: TYPE_E
+    payload: TYPE_B
     sensor_range: 12.0
   - drone_id: 5
-    payload: TYPE_A
+    payload: TYPE_C
     sensor_range: 12.0

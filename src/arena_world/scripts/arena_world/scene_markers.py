@@ -100,20 +100,37 @@ def build_scene_messages(scene):
         ma.markers.append(mk)
         ob_count += 1
 
-    # 投放点（球）
-    ds = float(vis.get("drop_marker_scale", [0.6, 0.6, 0.3])[0])
+    # 投送平台（直径 1.2m 薄盘 h=0.05，色=dp.color；外缘白色描边=口径标识）
+    platform_colors = {"red": (0.90, 0.20, 0.20), "blue": (0.20, 0.45, 0.90),
+                     "yellow": (0.90, 0.85, 0.10)}
     for dp in scene.drop_points:
+        col = platform_colors.get(dp.color, (0.6, 0.6, 0.6))
         mk = Marker()
         mk.header.frame_id = "world"
         mk.ns = "drop_points"
         mk.id = mid
         mid += 1
-        mk.type = Marker.SPHERE
+        mk.type = Marker.CYLINDER
         mk.action = Marker.ADD
-        mk.pose.position = Point(dp.xyz[0], dp.xyz[1], ground_z + ds / 2)
+        mk.pose.position = Point(dp.xyz[0], dp.xyz[1], ground_z + 0.025)
         mk.pose.orientation.w = 1.0
-        mk.scale.x = mk.scale.y = mk.scale.z = ds
-        mk.color.r, mk.color.g, mk.color.b, mk.color.a = (1, 0.2, 0.2, 1.0)
+        mk.scale.x = mk.scale.y = 1.2   # 规则口径：平台直径 1.2m
+        mk.scale.z = 0.05
+        mk.color.r, mk.color.g, mk.color.b, mk.color.a = (col[0], col[1], col[2], 0.95)
+        ma.markers.append(mk)
+        # 口径描边环（白，薄）
+        mk = Marker()
+        mk.header.frame_id = "world"
+        mk.ns = "drop_points"
+        mk.id = mid
+        mid += 1
+        mk.type = Marker.CYLINDER
+        mk.action = Marker.ADD
+        mk.pose.position = Point(dp.xyz[0], dp.xyz[1], ground_z + 0.01)
+        mk.pose.orientation.w = 1.0
+        mk.scale.x = mk.scale.y = 1.36
+        mk.scale.z = 0.02
+        mk.color.r, mk.color.g, mk.color.b, mk.color.a = (0.95, 0.95, 0.95, 0.9)
         ma.markers.append(mk)
 
     return pa, ma

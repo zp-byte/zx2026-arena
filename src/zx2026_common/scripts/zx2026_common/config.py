@@ -86,3 +86,19 @@ def type_to_uint8(t):
 
 def uint8_to_type(u):
     return UINT8_TO_TYPE.get(u, "UNKNOWN")
+
+
+# ---- 颜色映射（平台色/箱色，规则口径 3 色） ------------------------------------
+# 权威源是 scene_topology.yaml 的 color_map（TYPE→颜色名）；这里只定义
+# 颜色名 → u8 编码（tag_detector /drone_<i>/detected/color 话题）。
+# TYPE_D/TYPE_E 键保留防旧消息解码炸（历史序列化里可能出现 3/4）。
+COLOR_TO_UINT8 = {"red": 0, "blue": 1, "yellow": 2, "UNKNOWN": 255}
+UINT8_TO_COLOR = {0: "red", 1: "blue", 2: "yellow", 255: "UNKNOWN"}
+
+
+def color_to_uint8(c):
+    return COLOR_TO_UINT8.get(c, 255)
+
+
+def uint8_to_color(u):
+    return UINT8_TO_COLOR.get(u, "UNKNOWN")

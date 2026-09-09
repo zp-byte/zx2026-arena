@@ -15,6 +15,8 @@ topics:
   stage: /zx2026/state                          # 全局阶段机（P1..P5/DONE）
   score: /zx2026/score/{id}                     # zx2026_common/Score（latched，比分条）
   mission: /zx2026/mission/{id}                 # 任务指派（latched，payload→投放点）
+  task: /zx2026/task_update                     # 任务进度事件（TaskUpdate：LANDED/RETIRED）
+  summary: /zx2026/score_summary                # 赛末总分条（latched："total=.. s1=.. s2=.."）
 
 # GCS v0 第 2 步：操作编排（gcs_ops.py）——命令模板与门限全配置化
 ops:

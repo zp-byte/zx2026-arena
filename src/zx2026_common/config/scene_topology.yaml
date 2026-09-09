@@ -17,7 +17,7 @@ zones:
     pad_origin: [-25.5, 7.25]   # 第 0 号起降点地面坐标
   - id: transit            # 穿越区/障碍区（静态树）
     kind: forest
-    polygon: [[-60, -50], [60, -50], [60, 50], [-60, -50]]
+    polygon: [[-60, -50], [60, -50], [60, 50], [-60, 50]]
     forest:
       generator: "static"
       drop_clearance: 1.5
@@ -50,36 +50,35 @@ zones:
 crossing_zone:
   polygon: [[-5, -2], [7, -2], [7, 6], [-5, 6]]   # 12 × 8，中心 (1, 2)
 
-# ---- 投放点（场地右侧标识柱处） -----------------------------------------------
-# 6 机各分配唯一投放点，避免同点拥挤互撞；类型与 fleet 载荷一一对应
+# ---- 投送平台（场地右侧林区外缘，规则：3 平台/直径 1.2m） ------------------------
+# 规则口径：3 个投送点（直径约 1.2m 投掷平台），颜色区分补给类型；颜色-类型
+# 对应赛前不告知，机载须自主识别（color_id 闭环，bucket_select.py）。
+# color_map 是颜色权威源：Gazebo 材质 / RViz 平台标 / tag 检测三端共用，
+# 禁止另设硬编码色表（world_builder 双色表教训）。
+color_map:
+  TYPE_A: red        # 电池箱 → 红
+  TYPE_B: blue       # 药品箱 → 蓝
+  TYPE_C: yellow     # 食品箱 → 黄
+
 drop_points:
   - id: 1
-    xyz: [19.5, -10, 0.0]
+    xyz: [19.5, -6, 0.0]
     type_id: TYPE_A
+    color: red
     marker: "36h11_101"
   - id: 2
-    xyz: [19.5,  -6, 0.0]
+    xyz: [19.5,  0, 0.0]
     type_id: TYPE_B
+    color: blue
     marker: "36h11_102"
   - id: 3
-    xyz: [19.5,  -2, 0.0]
+    xyz: [19.5,  6, 0.0]
     type_id: TYPE_C
+    color: yellow
     marker: "36h11_103"
-  - id: 4
-    xyz: [19.5,   2, 0.0]
-    type_id: TYPE_D
-    marker: "36h11_104"
-  - id: 5
-    xyz: [19.5,   6, 0.0]
-    type_id: TYPE_E
-    marker: "36h11_105"
-  - id: 6
-    xyz: [19.5,  10, 0.0]
-    type_id: TYPE_A
-    marker: "36h11_106"
 
 # ---- 投放类型清单（每架携带物品类型取值空间） --------------------------------
-payload_types: [TYPE_A, TYPE_B, TYPE_C, TYPE_D, TYPE_E]
+payload_types: [TYPE_A, TYPE_B, TYPE_C]
 
 # ---- 静态障碍物（路缘、围栏、标识柱） -----------------------------------------
 # 坐标系：x-y 水平面，z 向上
@@ -113,25 +112,9 @@ static_obstacles:
   - kind: fence
     lo: [-18.60, -15.65, 0.0]
     hi: [ 22.80, -15.35, 1.30]
-  # 右侧彩色标识柱（仅 pole+base 碰撞体，环形装饰无碰撞）
-  - kind: marker
-    lo: [20.10, -10.90, 0.0]
-    hi: [21.90,  -9.10, 1.15]
-  - kind: marker
-    lo: [20.10,  -6.90, 0.0]
-    hi: [21.90,  -5.10, 1.15]
-  - kind: marker
-    lo: [20.10,  -2.90, 0.0]
-    hi: [21.90,  -1.10, 1.15]
-  - kind: marker
-    lo: [20.10,   1.10, 0.0]
-    hi: [21.90,   2.90, 1.15]
-  - kind: marker
-    lo: [20.10,   5.10, 0.0]
-    hi: [21.90,   6.90, 1.15]
-  - kind: marker
-    lo: [20.10,   9.10, 0.0]
-    hi: [21.90,  10.90, 1.15]
+  # 注：旧场景的"彩色标识柱"已删除——规则口径下平台色即显著标识，
+  # 且柱体(h1.15)会在低空层(0.55m)把平台心 goal 的 A* 规划围死
+  # （RECON GOTO_LO plan_fail 活锁根因，2026-09-08 法证）。
 
 # ---- 评分配置 ---------------------------------------------------------------
 score:

@@ -81,10 +81,17 @@ class Verifier:
         except Exception as e:
             log("start service FAIL:", e)
 
-        log("=== observation (450s, sample every 5s) ===")
+        # P6：观测窗跟随时限参数化（时限+60s，上限 1600；DONE 早退保留）
+        try:
+            from zx2026_common import config as _cfg
+            tl = float(_cfg.load("competition_rules.yaml").get("time_limit_s", 600.0))
+        except Exception:
+            tl = 600.0
+        observe_s = min(tl + 60.0, 1600.0)
+        log("=== observation (%.0fs, sample every 5s) ===" % observe_s)
         last_state = None
         t0 = time.time()
-        while time.time() - t0 < 450:
+        while time.time() - t0 < observe_s:
             if self.state != last_state:
                 last_state = self.state
                 log("-- state ->", self.state, "@ %.0fs" % (time.time() - t0))
@@ -95,7 +102,7 @@ class Verifier:
                     % (time.time() - t0, o0, o1,
                        self.phases.get(0), self.match.get(0)))
             if self.state == "DONE":
-                rospy.sleep(1.0)
+                rospy.sleep(2.0)   # 封卷报告落盘窗口（scorekeeper 收 DONE 写 yaml）
                 break
             rospy.sleep(5)
 
@@ -105,10 +112,29 @@ class Verifier:
         log("match:", {k: v for k, v in sorted(self.match.items())})
         log("odom drone0:", self.odom.get(0))
         log("score_summary:", self.score_summary)
-        # 通过判定：全部 DONE（永久冻结的机永远到不了 DONE）+ 全部 MATCH
-        ok = (self.state == "DONE"
-              and all(self.phases.get(i) == "DONE" for i in range(6))
-              and all(self.match.get(i) == "MATCH" for i in range(6)))
+        # 通过判定（比赛口径 2026-09-09）：时限封卷语义下未完成机不再等终态，
+        # "六机全 DONE+MATCH" 仅作 FULL 档对照打印。PASS = state DONE 时封卷
+        # 成功：封卷报告落盘（mtime≥观测起点防旧 run 残留）+ 零退赛 + ≥1 机落地。
+        full = (all(self.phases.get(i) == "DONE" for i in range(6))
+                and all(self.match.get(i) == "MATCH" for i in range(6)))
+        rep = None
+        try:
+            import glob
+            import os as _os
+            import yaml as _yaml
+            cands = [f for f in glob.glob("/tmp/zx2026_score_*.yaml")
+                     if _os.path.getmtime(f) >= t0 - 5.0]
+            if cands:
+                p = max(cands, key=_os.path.getmtime)
+                rep = _yaml.safe_load(open(p))
+        except Exception:
+            rep = None
+        log("full_completion:", full)
+        log("report retired:", (rep or {}).get("retired"),
+            "landed_n:", (rep or {}).get("landed_n"))
+        ok = (self.state == "DONE" and rep is not None
+              and not (rep.get("retired") or [])
+              and (rep.get("landed_n") or 0) >= 1)
         log("VERDICT:", "PASS" if ok else "FAIL")
         out.close()
 

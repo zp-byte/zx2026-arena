@@ -29,6 +29,18 @@ import time
 import yaml
 
 WS = os.path.expanduser("~/zx2026_arena_ws")
+
+
+def _time_limit_s():
+    """P6：时限从 competition_rules.yaml 读取（超时=时限+300）。"""
+    try:
+        with open(WS + "/src/zx2026_common/config/competition_rules.yaml") as f:
+            return float(yaml.safe_load(f).get("time_limit_s", 600.0))
+    except Exception:
+        return 600.0
+
+
+VERIFY_TIMEOUT = _time_limit_s() + 300.0
 CFG = WS + "/src/zx2026_common/config/sim_settings.yaml"
 VERIFY_TXT = "/tmp/zx2026_verify.txt"
 SMOKE_LOG = "/tmp/zx2026_smoke.log"
@@ -173,7 +185,7 @@ def _run_once(cell, outdir):
     timed_out = False
     try:
         subprocess.run(["bash", WS + "/run_verify.sh"],
-                       capture_output=True, text=True, timeout=900)
+                       capture_output=True, text=True, timeout=VERIFY_TIMEOUT)
     except subprocess.TimeoutExpired:
         timed_out = True
         subprocess.run(["pkill", "-f", "rosmaster.*11411"], capture_output=True)

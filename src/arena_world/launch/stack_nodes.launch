@@ -99,4 +99,7 @@
 
   <!-- 计分 -->
   <node pkg="arena_score" type="scorekeeper_node.py" name="scorekeeper" output="screen"/>
+
+  <!-- 比赛合规监视（退赛条款，P5） -->
+  <node pkg="arena_score" type="rule_monitor_node.py" name="rule_monitor" output="screen"/>
 </launch>

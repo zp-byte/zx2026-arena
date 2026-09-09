@@ -3,7 +3,8 @@
 # 细则更新时只改本文件。
 # =============================================================================
 
-time_limit_s: 600          # 科目总时限
+time_limit_s: 180          # 科目总时限（用户裁决 2026-09-08：1500→180s，仿真压缩
+                           # 测试口径；真机比赛按规则原文 25 分钟=1500s，部署前改回）
 phase_timeout_s: 60        # P3 起飞阶段超时（含错峰延迟）
 takeoff_stagger_s: 3.0     # 多机错峰起飞间隔(s)：drone i 延迟 i*stagger
 entry_stagger_s: 2.5       # P4 进入林区错峰间隔(s)：drone i 延迟 i*stagger（避免六机同挤入口）
@@ -13,9 +14,51 @@ return_stagger_s: 3.0      # 返航错峰间隔(s)：drone i 投放后延迟 i*s
 heights:
   takeoff_hover_z: 1.5     # 起降区悬停
   cruise_z: 2.5            # 穿越区平飞（树冠之上）
-  identify_z: 1.2          # 投放点正上方识别高度
-  drop_arrival_tol: 0.8    # 投放点水平到位阈值(m)
+  identify_z: 1.2          # （fallback 模式）投放点正上方识别高度
+  drop_hover_z: 0.80       # 投送平台悬停投放高度（用户裁决 2026-09-09：0.55→0.80，
+                           # 末段 P 环过冲 ~0.2m 时停 0.6 仍高于触地面 0.35；
+                           # 注意规则原文口径 50~60cm，真机按规则 0.55 复核）
+  drop_hover_tol: 0.62     # 精投放到位阈值(m)：RECON 降平台上空/扫描起始。
+                           # 须覆盖 悬停真值 ~0.3（nav 到位停拉阈 0.4 内的稳态）
+                           # + 定位漂移上限 0.3——漂移是慢随机游走，机载估计
+                           # 位置 0.27-0.57 随机，门太小则进 SCAN 全凭漂移相位
+                           # （run12 法证：d0 估 0.57 卡死 45s 腿超时，d3 估
+                           # 0.23 幸进）。判分走 scorekeeper 真值快照不受漂移
+                           # 污染（真值 offset 稳定 0.2-0.3 << 判线 0.6），放宽
+                           # 机载门不影响正确分
+  drop_release_tol: 0.35   # 释放对准门阈值(m)：MATCH 后须收敛回平台心才放行。
+                           # 配合 executor 对准期步进精修（P0-1：0.45 过冲 goal
+                           # 重启 nav 拉，单步收敛 ~0.1）——run13 被动 hold 空
+                           # 等超时硬放 offset 快照 0.26-0.58 骑判线 0.6。
+                           # 真值 offset 下界=|漂移|（对准地图坐标固有极限）
+  drop_align_timeout_s: 6.0  # 对准兜底放行(s)：分离力持续时防死等
+  drop_mid_z: 1.00          # GOTO_LO 中继高度(m)：三段各 ~0.2m 温和递降消 P 环过冲；<=0 退回两段
+  drop_arrival_tol: 0.8    # 投送平台水平到位阈值(m)（fallback/粗到位沿用）
   area_arrival_tol: 2.0    # 区域到位阈值(m)
+
+# ---- 颜色识别闭环（规则口径：平台色-类型对应赛前不告知） -----------------------
+# enabled=false 时逐位回退旧行为（任务直配投放点 + /detected/type 类型匹配）
+color_id:
+  enabled: true
+  scan_dwell_s: 2.0        # 每平台悬停侦察最短停留(s)
+  min_conf: 0.8            # 识别置信度门槛
+  n_frames: 3              # 连续命中帧数（bucket_select）
+  max_scan_rounds: 2       # 全扫无果的重扫轮数上限（超出即 COLOR_UNRESOLVED）
+  scan_leg_timeout_s: 45   # 单条 GOTO 腿超时(s)，超时跳平台（plan_fail 类活锁兜底）
+  settle_gate: true        # SCAN 入场稳定门（P0-1 第二刀）：est xy 在窗内极差
+                           # <settle_tol_m 才开扫——强迫 MATCH/释放发生在 nav
+                           # 收敛圈（真值 ≤0.15）内而非摆动弧上（run15' 法证：
+                           # 边飞边转下降穿过位置门，release x 偏东过冲 0.62）
+  settle_window_s: 0.8     # 稳定判窗(s)：漂移是慢游走窗内位移≈0，飞行/推挤大
+  settle_tol_m: 0.10       # 窗内 xy 极差阈值(m)，≈0.12m/s 判稳线
+  arrive_gate: true        # 到位信号门（P0-1 第三刀）：SCAN 入场/释放改挂 nav
+                           # 伺服收敛信号 /nav/arrived（est 系 xy 圈 arrive_tol_est
+                           # + z 真值圈，与水平控制律同帧）。run16 教训：settle 窗
+                           # 会把 P 环尾段慢速爬行误判为稳定；run17 教训：信号
+                           # 不能用真值帧（水平律驱动 est 系，伺服锁点真值=
+                           # goal−drift，|drift|>0.15 时真值判据永假→五机 SCAN
+                           # 全超时）。伺服锁点释放 offset=|漂移|=理论下界。
+                           # 旗关=回退 est 释放门+settle 窗
 
 # ---- 运动限制 ---------------------------------------------------------------
 motion:
@@ -38,11 +81,35 @@ tag_detection:
   occlusion: true          # 立木遮挡参与判定
 
 # ---- 计分规则 ---------------------------------------------------------------
+# ---- 计分（科目三比赛口径：S = S1 + S2，满分 100）----
 score:
-  TYPE_A: 10
-  TYPE_B: 15
-  TYPE_C: 20
-  TYPE_D: 25
-  TYPE_E: 30
-  wrong_drop_penalty: 0
+  s1_per_correct: 10      # S1 投放分：每箱正确投放到对应颜色平台 +10
+  s1_cap: 60              # 队级 S1 封顶（6 箱 x 10）
+  s2_ladder:              # S2 完成分：时限内返回起降区降落机数阶梯
+    6: 40
+    5: 30
+    4: 25
+    3: 15
+    2: 10
+    1: 5
+    0: 0
+  drop_tol_m: 0.6         # 平台投影判平台半径（平台直径 1.2m）
+  wrong_drop_penalty: 0   # 错投/偏投 0 分不倒扣
 tiebreak: [total_score, completion_time, first_correct_drop_time]
+
+# ---- 合规监视（rule_monitor，P5：退赛条款） ----------------------------------
+rule:
+  enabled: true
+  # 西侧含起降区（pads x=-25.5 在围栏以西）；东/北/南=围栏内缘
+  geofence: [[-27.0, -15.35], [22.5, -15.35], [22.5, 15.35], [-27.0, 15.35]]
+  out_of_bounds_grace_s: 10.0
+  ground_contact_z: 0.30
+  unauthorized_landing_grace_s: 1.5
+  max_height_m: 5.0
+  height_grace_s: 2.0
+  return_through_forest: true
+  corridor_margin_m: 1.0     # 树林外接框外扩(+)容忍贴林缘 / 内缩(-)严格
+  return_corridor: []        # 显式多边形优先；空=按树林外接框推导
+  retire_on_corridor_miss: false   # 默认只剥 S2 计数不退赛
+  retire_score_keep: true    # 退赛机 S1 保留、S2 剔除
+  selftest_inject: false     # 注入后门（P8 注入测试临时开）

@@ -152,12 +152,33 @@ class WorldNode:
         self.pub_odom = {}
         self.pub_collision = {}
         self.sub_vel = {}
+        self.landing_armed = {i: False for i in self.drones}
+        _rc = self.sim_settings.get("collision", {}).get("recovery", {})
+        # 恢复期指令隔离（lock_cmd）：弹开/冷却/冻结指令独占 cmd_vel。
+        # 执行器 20Hz 指令流会在 world 步进间隙覆盖恢复指令——架空永久
+        # 冻结后 hover 回拉持续下压 + collided 期间免碰撞检测 → 落地机
+        # 无限下沉（run4/5 法证：d1 沉至 z=-3.56、d0 -0.70 误判退赛）
+        self._recovery_lock = bool(_rc.get("lock_cmd", True))
+        # 停机豁免（park_ground_skip）：armed 过（计划着地序列）即永久
+        # 跳过地面子句——touchdown 解除 armed 时 z≈0.27 仍在空中，触地
+        # 子句会把着地机判成碰撞弹跳（run4 五机簇2 法证）。退赛监视
+        # （rule_monitor）不受此豁免影响，仍按 z/pad/armed 独立判定。
+        self._park_skip = bool(_rc.get("park_ground_skip", True))
+        # 低空弹开钳位（low_bounce_up）：z<1.0 时弹开方向垂直分量一律向上——
+        # 爬升中被撞（rev 含向下分量）会把机压进地面（run6 法证二次触地
+        # z=0.01 级联）；互撞弹开本就水平，不受影响
+        self._low_bounce_up = bool(_rc.get("low_bounce_up", True))
+        self._ever_armed = {i: False for i in self.drones}
         for i, d in self.drones.items():
             ns = "/drone_%d" % i
             self.pub_odom[i] = rospy.Publisher(ns + "/odom", Odometry, queue_size=10)
             self.pub_collision[i] = rospy.Publisher(ns + "/collision", Bool, queue_size=1, latch=True)
             self.sub_vel[i] = rospy.Subscriber(
                 ns + "/vel_cmd", Twist, lambda msg, i=i: self._on_vel_cmd(i, msg))
+            # 真落地门控：armed=True 时跳过地面子句（最后下降段才有生存期，
+            # touchdown 后立即复位——漏关放过不了树/围栏/机间碰撞）
+            rospy.Subscriber(ns + "/mission/landing_armed", Bool,
+                             lambda msg, i=i: self._on_landing_armed(i, msg))
         # TF：world → drone_<i>，供 RViz 显示无人机位姿/轨迹
         self.tf_pub = rospy.Publisher("/tf", tfMessage, queue_size=10)
         # 风观测（仅启用时发布，供 flock_obs 采样阵风幅值）
@@ -193,11 +214,27 @@ class WorldNode:
 
     def _on_vel_cmd(self, i, msg):
         d = self.drones[i]
+        if self._recovery_lock and d.collided and d._collision_enabled:
+            # 碰撞恢复期丢弃执行器指令：恢复序列（弹开/冷却/冻结）必须
+            # 完整执行，否则被 20Hz 指令流逐拍覆盖架空（见 __init__ 注释）
+            return
         d.set_vel_cmd(msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z)
+
+    def _on_landing_armed(self, i, msg):
+        prev = self.landing_armed.get(i, False)
+        self.landing_armed[i] = bool(msg.data)
+        if msg.data:
+            self._ever_armed[i] = True  # 停机豁免锁存（_park_skip 用）
+        if prev and not msg.data:
+            rospy.loginfo("drone %d landing disarmed", i)
+        elif msg.data and not prev:
+            rospy.loginfo("drone %d landing armed", i)
 
     def _on_reset(self, req):
         for i, d in self.drones.items():
             d.backend.reset((d.home[0], d.home[1], d.home[2], 0.0))
+            self.landing_armed[i] = False
+            self._ever_armed[i] = False
             d.collided = False
             d._collide_logged = False
             d.cmd_vel = np.zeros(3)
@@ -223,12 +260,15 @@ class WorldNode:
         if self.wind_model is not None:
             self.wind_model.step(dt)
 
-        # 碰撞检测（对上一状态）：障碍 + 地面
+        # 碰撞检测（对上一状态）：障碍 + 地面（landing_armed 时机豁免地面子句）
         for i, d in self.drones.items():
             if d.collided:
                 continue
             p = d.state().pos_tuple()
-            if self.scene.collides(p):
+            skip_g = self.landing_armed.get(i, False)
+            if self._park_skip and self._ever_armed.get(i, False):
+                skip_g = True  # 停机豁免：计划着地机贴地不判碰撞
+            if self.scene.collides(p, skip_ground=skip_g):
                 d.collided = True
                 self.pub_collision[i].publish(Bool(data=True))
                 if not d._collide_logged:
@@ -245,6 +285,9 @@ class WorldNode:
                         d._bounce_dir = np.array(geo.normalize(rev)) * d._bounce_vel
                     else:
                         d._bounce_dir = np.array([0.0, 0.0, d._bounce_vel])
+                    if self._low_bounce_up and p[2] < 1.0 and d._bounce_dir[2] < 0.0:
+                        # 低空弹开钳位：见 __init__ 注释
+                        d._bounce_dir[2] = -d._bounce_dir[2]
 
         # 六机互撞
         states = {i: d.state() for i, d in self.drones.items()}

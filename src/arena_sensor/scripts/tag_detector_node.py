@@ -3,9 +3,12 @@
 """arena_sensor::tag_detector_node — 投放点 Tag 检测（每机一个）。
 
 输入: /drone_<id>/odom + /zx2026/scene
-输出: /drone_<id>/detected/tag_id, /drone_<id>/detected/type, /drone_<id>/detected/confidence
+输出: /drone_<id>/detected/tag_id, /drone_<id>/detected/type,
+      /drone_<id>/detected/color, /drone_<id>/detected/confidence
 判定: 距离 ≤ range ∧ 在 FOV 内 ∧ 无遮挡（几何三重判定，区别于旧 sim_detector 的
        "距投放点<5m 即命中"）。
+诚实性: 检测输出的是"可见平台"的真值颜色编码（无相机渲染，可见性由几何
+       三重判定门控）；color_id 闭环下"选哪个平台"的决策仍完全在机载。
 """
 import math
 import random
@@ -35,6 +38,7 @@ class TagDetectorNode:
 
         self.pub_tag = rospy.Publisher(ns + "/detected/tag_id", Int32, queue_size=10)
         self.pub_type = rospy.Publisher(ns + "/detected/type", UInt8, queue_size=10)
+        self.pub_color = rospy.Publisher(ns + "/detected/color", UInt8, queue_size=10)
         self.pub_conf = rospy.Publisher(ns + "/detected/confidence", Float32, queue_size=10)
         rospy.Subscriber(ns + "/odom", Odometry, self._on_odom)
         rospy.Subscriber("/zx2026/scene", PoseArray, self._on_scene)
@@ -62,10 +66,12 @@ class TagDetectorNode:
         if dp is None:
             self.pub_tag.publish(Int32(data=-1))
             self.pub_type.publish(UInt8(data=255))
+            self.pub_color.publish(UInt8(data=255))
             self.pub_conf.publish(Float32(data=0.0))
             return
         self.pub_tag.publish(Int32(data=dp.id))
         self.pub_type.publish(UInt8(data=cfg.type_to_uint8(dp.type_id)))
+        self.pub_color.publish(UInt8(data=cfg.color_to_uint8(dp.color)))
         self.pub_conf.publish(Float32(data=conf))
         rospy.logdebug_throttle(2.0,
                                 "drone %d sees drop point %d (%s) conf=%.2f",

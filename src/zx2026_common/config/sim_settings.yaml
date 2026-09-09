@@ -94,11 +94,27 @@ mission:
 # enabled=false：回退真值全局 A*（原版 god-mode）。
 closed_loop:
   enabled: true            # true=点云闭环全局规划；false=真值全局 A*（原版）
+  halt_on_landed: true     # 【run9 翻开】着陆终态机退出控制/分离场：pads 同排 1.5m <
+                           # 分离半径，已落地机留在 Boids 分离场——后降机被托在
+                           # z≈0.35-0.41 永不达 touchdown 判据（run8 d1 armed×3
+                           # 卡 70s+）、先降机被托离地面（d0 0.05→0.78）。
+                           # LANDED/DONE 剔除；RETIRED/FAILED/ABORT 悬停锁定保留
   drift_rate: 0.006        # 定位漂移随机游走速率 (m/step @ replan_hz)，慢累积≈150s 到 ~0.2m
   drift_max: 0.3           # 漂移上限 (m)
   lidar_top_blind: true    # 顶盲锥（Mid-360 式，正上方盲区）
   replan_hz: 10            # 漂移更新 / 控制频率 (Hz)
-  max_vel: 1.5             # 闭环巡航限速 (m/s)，低于全局 default_max_vel，留反应余量
+  max_vel: 1.8             # 闭环巡航限速 (m/s)（用户裁决 2026-09-09：1.5→1.8，
+                           # 180s 时限提速项 B；仍低于全局 default_max_vel 2.0）
+  arrive_tol: 0.4          # 到位停拉圈 (m)——巡航/中转 goal 的到位判据
+  arrive_tol_low_z: 0.15   # 低空精确段停拉圈 (m)（P0-1：goal z<low_z_max 时生效，
+                           # drop 悬停 0.8/touchdown 0.12；0.4 圈随机停点+漂移
+                           # =释放 offset 0.26-0.58 骑线真身，run13/14 法证）
+  arrive_tol_low_z_max: 1.5  # 低空特化的 goal z 上限 (m)
+  arrive_tol_est: 0.10     # 伺服收敛信号圈 (m，est 系 xy)——/nav/arrived 广播判据。
+                           # 水平控制律驱动 est 系（cmd=航点−est_pos），平衡点
+                           # est=goal、真值停 goal−drift（run17 法证：真值判据在
+                           # |drift|>0.15 时永假致五机 SCAN 全超时）；信号须与
+                           # 控制环同帧，此刻 cmd≈0 零爬行，释放点=理论下界
   # ---- P1 时间一致性（DeFoP §anti-oscillation 移植） --------------------------------
   # (a) 路径粘滞：全局 A* 路径设最短驻留 stick_s，期间不重选，除非 路径被新占用格
   #     切断 / 碰撞事件 / 新 goal——治"绕树左右两解等代价时每 0.5s 重选来回翻"。
@@ -159,9 +175,16 @@ closed_loop:
   # PASS。无独立收益：现行碰撞群集在走廊而非 goal 邻域，机制无标可打；
   # 保留实现，待"goal 邻域挤入"新形态出现时重评。
   near_stop_zone:
-    enabled: false          # 【默认关】见上判词；A/B：run_logs/batch1_*
+    enabled: true           # 【2026-09-08 重评翻开】平台上空精降新形态：hover 0.55 末段
+                             # 被 vcap 地板保底 ~0.53m/s 压出 ~0.21m 沉深（速度环
+                             # τ≈0.4s）→ z≈0.34 触地弹跳→退休级联（run6 六起碰撞
+                             # 全 z=0.35 整）。2026-09-01 判词"待 goal 邻域挤入
+                             # 新形态重评"即此形态；旧 A/B（batch1_*）当时碰撞群集
+                             # 在走廊非 goal 邻域，无标可打=无独立收益，非否决。
     zone_r: 1.0             # 近停区半径 (m)，距 goal 小于该值地板开始衰减
     deadband: 0.2           # 距 goal 该值内地板恒 0（允许微调刹停）
+    scale_min: 0.25         # 衰减钳位下限——归 0 会把 vcap 压到 0 冻结末段收敛
+                             # （run7 d1 卡 touchdown 阈上方 / d5 腿超时法证）
 
   # ---- W3 塌缩卫兵（返航冻结修复，2026-09-05） --------------------------------
   # 形态：返航腿起飞数米后 mm/s 爬行至冻结（run 214546/194437/live 三局同
@@ -430,6 +453,13 @@ collision:
     max_collisions: 8          # 超过此次数永久冻结（R1 调参 3→5→8：风场启用后窄走廊
                               # 阵风瞬态会撞树，碰撞标记逐次封堵树丛需 ~5-7 次/机才绕开；
                               # 8 次保任务完成，撞树仍作保真度信号。无风基线 0-1 次/机）
+    lock_cmd: true            # 恢复期指令隔离：碰撞弹开/冷却/冻结期间丢弃执行器 vel_cmd
+                              # （否则 20Hz 指令流逐拍覆盖恢复指令，架空冻结→着地机被
+                              # hover 回拉持续压入地下，run4/5 法证 d1 沉至 z=-3.56）
+    park_ground_skip: true    # 停机豁免：armed 过的机永久跳过地面子句（touchdown 解除
+                              # armed 时 z≈0.27 仍在空中，触地子句会把着地机判成碰撞弹跳）
+    low_bounce_up: true       # 低空弹开钳位：z<1.0 弹开垂直分量一律向上（爬升中被撞
+                              # rev 向下会把机压进地面，run6 二次触地 z=0.01 级联）
     fence_events: false      # W5：围栏纳入碰撞事件集（默认关待 A/B）。西围栏顶 1.30
                              # 托住低空穿行的 d5（坐顶 z=1.40），原监控器对围栏
                              # 接触零事件零恢复；true=fence AABB 走 bush 同款

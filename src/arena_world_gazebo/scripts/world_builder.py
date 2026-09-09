@@ -18,26 +18,15 @@ from zx2026_common.scene import Scene
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "worlds", "forest_world.world")
 
-TYPE_COLORS = {
-    "TYPE_A": (0.90, 0.20, 0.20),
-    "TYPE_B": (0.95, 0.60, 0.10),
-    "TYPE_C": (0.90, 0.85, 0.10),
-    "TYPE_D": (0.20, 0.80, 0.30),
-    "TYPE_E": (0.20, 0.45, 0.90),
+# 平台色板（唯一色表；权威源=scene.color_map/dp.color 的颜色名，此处只做名字→RGB）
+PLATFORM_COLORS = {
+    "red": (0.90, 0.20, 0.20),
+    "blue": (0.20, 0.45, 0.90),
+    "yellow": (0.90, 0.85, 0.10),
 }
 DRONE_COLORS = [
     (0.90, 0.30, 0.30), (0.30, 0.75, 0.95), (0.30, 0.85, 0.45),
     (0.95, 0.65, 0.15), (0.75, 0.45, 0.95), (0.95, 0.90, 0.30),
-]
-
-# 右侧标识柱颜色（与 subject3-scene.js 对应）
-MARKER_COLORS = [
-    (0.61, 0.35, 0.71),  # purple
-    (0.49, 0.85, 0.34),  # green
-    (0.12, 0.56, 0.24),  # dark green
-    (0.95, 0.76, 0.19),  # yellow
-    (0.23, 0.51, 0.96),  # blue
-    (0.35, 0.78, 0.85),  # cyan
 ]
 
 
@@ -135,23 +124,24 @@ def pad_model(i, x, y):
 
 
 def drop_model(dp):
-    r, g, b = TYPE_COLORS.get(dp.type_id, (0.9, 0.9, 0.9))
-    disc = '<cylinder><radius>0.45</radius><length>0.1</length></cylinder>'
-    tag = '<box><size>0.25 0.25 0.9</size></box>'
+    """投送平台（规则口径：直径约 1.2m 的有色标识平台）：r=0.6 薄盘 h=0.05，
+    色=dp.color（color_map 权威）；外缘白色描边环作 1.2m 口径标识。
+
+    平台整体即碰撞体（薄盘 h=0.05），任何巡航/悬停高度层均不构成障碍。
+    """
+    r, g, b = PLATFORM_COLORS.get(dp.color, (0.90, 0.90, 0.90))
+    disc = '<cylinder><radius>0.60</radius><length>0.05</length></cylinder>'
+    ring = '<cylinder><radius>0.68</radius><length>0.02</length></cylinder>'
     return """<model name="drop_%d">
   <static>true</static>
-  <pose>%.2f %.2f 0.05 0 0 0</pose>
-  <link name="disc">
+  <pose>%.2f %.2f 0.0 0 0 0</pose>
+  <link name="platform">
     %s
-    %s
-  </link>
-  <link name="tag">
-    <pose>0 0 0.55 0 0 0</pose>
-    %s
+    <visual name="disc"><pose>0 0 0.025 0 0 0</pose><geometry>%s</geometry>%s</visual>
+    <visual name="rim"><pose>0 0 0.01 0 0 0</pose><geometry>%s</geometry>%s</visual>
   </link>
 </model>""" % (dp.id, dp.xyz[0], dp.xyz[1],
-              col_geo(disc), vis_geo(disc, mat(r, g, b)),
-              vis_geo(tag, mat(1.0, 1.0, 1.0)))
+              col_geo(disc), disc, mat(r, g, b), ring, mat(0.95, 0.95, 0.95))
 
 
 def drone_model(i, x, y):
@@ -291,55 +281,22 @@ def crossing_zone_models():
     return models
 
 
-def marker_post_model(i, x, y, color):
-    """彩色标识柱：底座 + 立柱 + 彩色环（环用薄圆柱近似）。"""
-    r, g, b = color
-    models = []
-    # 底座圆柱
-    base = '<cylinder><radius>0.9</radius><length>0.18</length></cylinder>'
-    models.append("""<model name="marker_base_%d">
-  <static>true</static>
-  <pose>%.2f %.2f 0.09 0 0 0</pose>
-  <link name="link">
-    %s
-    %s
-  </link>
-</model>""" % (i, x, y, col_geo(base), vis_geo(base, mat(0.60, 0.60, 0.58))))
-    # 立柱
-    pole = '<cylinder><radius>0.09</radius><length>0.9</length></cylinder>'
-    models.append("""<model name="marker_pole_%d">
-  <static>true</static>
-  <pose>%.2f %.2f 0.6 0 0 0</pose>
-  <link name="link">
-    %s
-    %s
-  </link>
-</model>""" % (i, x, y, col_geo(pole), vis_geo(pole, mat(0.47, 0.47, 0.47))))
-    # 彩色环
-    ring = '<cylinder><radius>1.05</radius><length>0.08</length></cylinder>'
-    models.append("""<model name="marker_ring_%d">
-  <static>true</static>
-  <pose>%.2f %.2f 1.15 0 0 0</pose>
-  <link name="link">
-    %s
-    %s
-  </link>
-</model>""" % (i, x, y, col_geo(ring), vis_geo(ring, mat(r, g, b))))
-    return models
-
-
 def fence_models():
-    """场地外围围栏。"""
+    """场地外围围栏（与 scene_topology.yaml static_obstacles fence AABB 对齐）。
+
+    修复历史失和：fence_e 原 18.6 vs yaml 22.50~22.80（中心 22.65）、
+    N/S 长度 37.2 vs yaml 41.4（x -18.60~22.80，中心 2.10）。
+    """
     models = []
-    # x 方向两侧
-    models.append(thin_box_model("fence_w", -18.6, 0, 0.0, 0.3, 30, 1.3,
+    # x 方向两侧（y 跨 -15.5~15.5，长 31）
+    models.append(thin_box_model("fence_w", -18.60, 0, 0.0, 0.3, 31.0, 1.3,
                                  (0.31, 0.42, 0.27)))
-    models.append(thin_box_model("fence_e",  18.6, 0, 0.0, 0.3, 30, 1.3,
+    models.append(thin_box_model("fence_e",  22.65, 0, 0.0, 0.3, 31.0, 1.3,
                                  (0.31, 0.42, 0.27)))
-    # z 方向两侧
-    models.append(thin_box_model("fence_n", 0,  15.5, 0.0, 37.2, 0.3, 1.3,
+    # y 方向两侧（x 跨 -18.6~22.8，长 41.4，中心 2.1）
+    models.append(thin_box_model("fence_n", 2.1,  15.5, 0.0, 41.4, 0.3, 1.3,
                                  (0.31, 0.42, 0.27)))
-    models.append(thin_box_model("fence_s", 0, -15.5, 0.0, 37.2, 0.3, 1.3,
+    models.append(thin_box_model("fence_s", 2.1, -15.5, 0.0, 41.4, 0.3, 1.3,
                                  (0.31, 0.42, 0.27)))
     return models
 
@@ -370,11 +327,6 @@ def build():
     out.extend(takeoff_pad_model())
     out.extend(crossing_zone_models())
     out.extend(fence_models())
-
-    # 右侧标识柱
-    marker_zs = [-10, -6, -2, 2, 6, 10]
-    for i, z in enumerate(marker_zs):
-        out.extend(marker_post_model(i, 21, z, MARKER_COLORS[i]))
 
     # 树/灌木
     n_tree = n_bush = 0

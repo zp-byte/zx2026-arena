@@ -20,6 +20,18 @@ import sys
 import yaml
 
 WS = os.path.expanduser("~/zx2026_arena_ws")
+
+
+def _time_limit_s():
+    """P6：时限从 competition_rules.yaml 读取（回填窗=时限+60）。"""
+    try:
+        with open(WS + "/src/zx2026_common/config/competition_rules.yaml") as f:
+            return float(yaml.safe_load(f).get("time_limit_s", 600.0))
+    except Exception:
+        return 600.0
+
+
+WINDOW_S = _time_limit_s() + 60.0
 CSV_PATH = os.path.join(WS, "run_logs", "nav_metrics_ts.csv")
 COLS = ["tag", "seed", "verdict", "score", "done_t", "col", "stuck_s",
         "stuck_n", "flips", "dist", "minclr", "runtime_s", "timeout"]
@@ -77,7 +89,7 @@ def agg_from_csv(rows, seed, origin):
             if r[0] != str(seed):
                 continue
             sim_t = float(r[11])
-            if not (origin - 5 <= sim_t <= origin + 450):
+            if not (origin - 5 <= sim_t <= origin + WINDOW_S):
                 continue
             last[r[2]] = r
         except (ValueError, IndexError):
@@ -126,8 +138,8 @@ def main():
             if row["verdict"] != "PASS" and cell_dir:
                 origin = smoke_origin(os.path.join(cell_dir, "smoke.log"))
                 if origin is not None:
-                    # 窗口上限 = verify 观测上限 450s（同 seed 下一 cell 的 origin
-                    # 至少在本 cell origin + runtime+过渡 之后，+450 恰好隔开）
+                    # 窗口上限 = verify 观测上限（时限+60s，P6 参数化；
+                    # 同 seed 下一 cell 的 origin 至少在本 cell origin + runtime+过渡 之后）
                     agg = agg_from_csv(all_rows, int(row["seed"]), origin)
                     if agg:
                         print("recovered %s_seed%s from csv (origin=%.0f, %d drones)"

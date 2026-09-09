@@ -56,6 +56,8 @@ class Hub(object):
                    for i in self.ids}
         self.conns = 0
         self.stage = None  # 全局阶段机（/zx2026/state，agent 上报）
+        self.tasks = {}          # did -> 任务进度事件（task_update，agent 透传）
+        self.score_total = None  # 赛末总分 dict（score_summary 解析，agent 透传）
         self.events = deque(maxlen=400)
         self.logf = open(logpath, "a", encoding="utf-8")
         self.logpath = logpath
@@ -93,6 +95,11 @@ class Hub(object):
             for did, m in (obj.get("missions") or {}).items():
                 if did in self.st:
                     self.st[did]["mission"] = m
+            for did, t in (obj.get("tasks") or {}).items():
+                if did in self.st:
+                    self.tasks[did] = t
+            if obj.get("score_total"):
+                self.score_total = obj["score_total"]
             for did, d in obj.get("drones", {}).items():
                 if did not in self.st:
                     continue
@@ -227,11 +234,17 @@ class Hub(object):
                 missions = {did: self.st[did]["mission"]
                             for did in self.ids
                             if self.st[did]["mission"] is not None}
+                tasks = dict(self.tasks)
+                total = self.score_total
             snap["linked"] = linked   # 按数据年龄算的活链路数（比 TCP conns 真实）
             snap["events"] = evs
             snap["grids"] = grids
             snap["scores"] = scores
             snap["missions"] = missions
+            if tasks:
+                snap["tasks"] = tasks
+            if total:
+                snap["score_total"] = total
             try:
                 tmp = self.status_path + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
