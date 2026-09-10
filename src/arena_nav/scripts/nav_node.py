@@ -1915,6 +1915,14 @@ class NavNode:
 
         tw = Twist()
         tw.linear.x, tw.linear.y, tw.linear.z = cmd[0], cmd[1], cmd[2]
+        if self._halted:
+            # halt 双查（run d83e657c 法证，2026-09-10）：落地回调在独立线程，
+            # 可在本拍已在飞时置位 _halted 并发零速——本拍尾部的发布若照发，
+            # 会把零速覆盖回带 vz 分量的反应层指令。Python 后端 world 保持
+            # 末值仅水平漂移，Gazebo 后端（drone_vel_plugin 末值跟踪）把它
+            # 放大成永久爬升：d1 落地后云避障对 0.38m 贴身障碍推 vz>0 覆盖
+            # 零速 → 0.22m/s 匀速爬至 5m → OVER_HEIGHT 退赛（任务已 DONE）。
+            return
         self.pub_vel.publish(tw)
         self.pub_arrived.publish(Bool(data=self.goal_reached()))
         # P0 指标（纯观测）

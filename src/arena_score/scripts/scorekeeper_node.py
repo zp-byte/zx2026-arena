@@ -69,6 +69,7 @@ class ScorekeeperNode:
         self.path_start = {}
         self.path_stats = {}
         self._reported = False
+        self._started = False   # odom 回调可能先于 P4_EXECUTE 到（竞态 AttributeError）
 
         self.pub = {}
         self.pub_summary = rospy.Publisher("/zx2026/score_summary", String, queue_size=1, latch=True)
