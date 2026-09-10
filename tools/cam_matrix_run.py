@@ -6,8 +6,8 @@
 其余机制一律不动（用户默认档），避免把无关开关卷进 A/B 方差。
 
 矩阵（交错执行，防时段漂移混淆臂间差异）：
-  truth   color_id.source=truth   seeds 42/43/45   基线（真值检测，现行为）
-  camera  color_id.source=camera  seeds 42/43/45   HSV 相机检测臂
+  truth   color_id.source=truth   seeds 42-46   基线（真值检测，显式回退）
+  camera  color_id.source=camera  seeds 42-46   HSV 相机检测臂（默认感知链）
 
 判定口径（计划 P3）：两臂全 PASS、col=0、done_t 在方差带内、minclr 不降。
 
@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 
 import yaml
@@ -33,11 +34,15 @@ RULES = WS + "/src/zx2026_common/config/competition_rules.yaml"
 VERIFY_TXT = "/tmp/zx2026_verify.txt"
 SMOKE_LOG = "/tmp/zx2026_smoke.log"
 
-SEEDS = (42, 43, 45)
-CELLS = []
-for seed in SEEDS:
-    CELLS.append(dict(tag="truth", seed=seed, source="truth"))
-    CELLS.append(dict(tag="camera", seed=seed, source="camera"))
+SEEDS = (42, 43, 44, 45, 46)   # 与 matrix_run.py 五 seed 口径一致；argv 可覆写
+
+
+def build_cells(seeds):
+    cells = []
+    for seed in seeds:
+        cells.append(dict(tag="truth", seed=seed, source="truth"))
+        cells.append(dict(tag="camera", seed=seed, source="camera"))
+    return cells
 
 
 def _time_limit_s():
@@ -193,11 +198,14 @@ def main():
             "stuck_n", "flips", "dist", "minclr", "runtime_s", "sleep_s",
             "timeout"]
     print("cam A/B matrix start ->", outroot, flush=True)
+    seeds = [int(a) for a in sys.argv[1:]] or list(SEEDS)
+    cells = build_cells(seeds)
+    print("cells:", [(c["tag"], c["seed"]) for c in cells], flush=True)
     rows = []
     try:
-        for k, cell in enumerate(CELLS):
+        for k, cell in enumerate(cells):
             name = "%02d_%s_seed%d" % (k, cell["tag"], cell["seed"])
-            print("[%d/%d] %s running..." % (k + 1, len(CELLS), name), flush=True)
+            print("[%d/%d] %s running..." % (k + 1, len(cells), name), flush=True)
             row = run_cell(cell, os.path.join(outroot, name))
             rows.append(row)
             with open(csv_path, "a") as f:

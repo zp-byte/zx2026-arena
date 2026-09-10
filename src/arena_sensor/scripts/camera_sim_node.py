@@ -6,7 +6,7 @@ color_id.source=camera 的图像源：从 Scene 真值几何 + 真值 odom 渲�
 sensor_msgs/Image（camera_render.render_frame，传感器模型哲学同 lidar_node）。
 发布 /drone_<id>/camera/image_raw (bgr8) + /drone_<id>/camera/camera_info。
 
-自门控（诚实边界）：color_id.source=truth（默认）时本节点启动即退、
+自门控（诚实边界）：color_id.source=truth（回退显式）时本节点启动即退、
 不创建任何 Publisher——与真值 tag_detector 结构上互斥，消灭 /detected/*
 双发布者竞态。整帧丢失（dropout）时本帧不发布，由检测器看门狗发哨兵。
 """
@@ -30,7 +30,7 @@ class CameraSimNode:
         rospy.init_node("camera_sim_node", anonymous=True)
         self._active = False
         source = (cfg.load("competition_rules.yaml").get("color_id", {})
-                  .get("source", "truth"))
+                  .get("source", "camera"))
         if source != "camera":
             rospy.loginfo("camera_sim_node: disabled (color_id.source=%s)", source)
             return

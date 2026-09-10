@@ -31,8 +31,9 @@
   </node>
 
   <!-- 相机颜色检测链（每机：合成渲染 + HSV 检测器，2026-09-10 相机立项）。
-       自门控：color_id.source=truth（默认）时两节点启动即退、零发布者；
-       source=camera 时真值 tag_detector 同样自门控让位——结构互斥。 -->
+       自门控：color_id.source=camera（默认，感知链）时两节点活跃；
+       source=truth（回退显式）时启动即退、零发布者，真值 tag_detector
+       恢复——结构互斥。 -->
   <node pkg="arena_sensor" type="camera_sim_node.py" name="camera_sim_0" output="log">
     <param name="drone_id" value="0"/>
   </node>

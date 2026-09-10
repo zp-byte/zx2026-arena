@@ -11,7 +11,7 @@ camera/image_raw 相对机 namespace；真机 D435 覆写 /camera/color/image_ra
 tag_id 恒 -1（零消费者；推断须读真值破边界）。type 由 scene_topology
 color_map 反查（配置权威，非运行时真值）；同色多类型歧义发 255。
 
-自门控：color_id.source=truth（默认）时启动即退、零 Publisher。
+自门控：color_id.source=truth（回退显式）时启动即退、零 Publisher。
 看门狗（2Hz）：图像龄 > stale_s 发哨兵——相机死后旧检测不得继续喂
 bucket_select 计数（NO_DET 复位语义，bucket_select.py:31-33）。
 """
@@ -30,7 +30,7 @@ class ColorDetectorNode:
         rospy.init_node("color_detector_node", anonymous=True)
         self._active = False
         rules = cfg.load("competition_rules.yaml")
-        source = (rules.get("color_id", {}) or {}).get("source", "truth")
+        source = (rules.get("color_id", {}) or {}).get("source", "camera")
         if source != "camera":
             rospy.loginfo("color_detector_node: disabled (color_id.source=%s)", source)
             return

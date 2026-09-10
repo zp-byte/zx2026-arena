@@ -11,7 +11,7 @@
                    计划原文"斜视"假设在无云台下不成立，本组锚定实际语义）
   D 端到端语义   进程内 bucket_scan_step：20 帧悬停→LOCK；异色永不清零
                    不得 LOCK；NO_DET 清零；半遮挡低置信冻结后恢复帧即锁
-  E 门控谓词     color_id.source 默认 truth 完好；两新节点早退谓词成立
+  E 门控谓词     color_id.source 默认 camera（感知链）；早退谓词两态自洽
 
 用法： python3 tools/camera_selftest.py
 """
@@ -257,12 +257,14 @@ def group_d():
 # ---------------------------------------------------------------- E 门控谓词
 def group_e():
     rules = cfg.load("competition_rules.yaml")
-    source = (rules.get("color_id", {}) or {}).get("source", "truth")
-    check("E1 color_id.source 默认 truth", source == "truth")
-    # 两新节点早退谓词（与节点内联一致）：source != camera → 不创建发布者
-    exit_sim = source != "camera"
-    exit_det = source != "camera"
-    check("E2 新节点早退谓词成立", exit_sim and exit_det)
+    source = (rules.get("color_id", {}) or {}).get("source", "camera")
+    check("E1 color_id.source 默认 camera（感知链）", source == "camera")
+    # 早退谓词形式（与节点内联一致）：truth（非 camera）→ 新节点不创建发布者、
+    # 真值 tag_detector 活跃；camera → 新节点活跃、tag_detector 让位。
+    # 纯函数形式不依赖当前默认值，truth/camera 两态都应自洽。
+    pred = lambda s: s != "camera"
+    check("E2 早退谓词形式成立（truth→退, camera→活）",
+          pred("truth") and not pred("camera"))
 
 
 def main():

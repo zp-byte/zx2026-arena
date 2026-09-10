@@ -34,7 +34,7 @@ class TagDetectorNode:
         # 检测器让位——在创建任何 Publisher 前退出，结构上消灭 /detected/*
         # 双发布者竞态（camera_sim_node/color_detector_node 同款自门控）。
         source = (cfg.load("competition_rules.yaml").get("color_id", {})
-                  .get("source", "truth"))
+                  .get("source", "camera"))
         if source == "camera":
             rospy.loginfo("tag_detector_node: disabled (color_id.source=camera)")
             return
