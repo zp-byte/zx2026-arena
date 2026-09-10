@@ -193,6 +193,8 @@ def main():
     os.makedirs(outroot, exist_ok=True)
     backup = RULES + ".cam_bak"
     shutil.copy(RULES, backup)
+    backup_cfg = CFG + ".cam_bak"
+    shutil.copy(CFG, backup_cfg)
     csv_path = os.path.join(outroot, "matrix_results.csv")
     cols = ["tag", "seed", "verdict", "score", "done_t", "col", "stuck_s",
             "stuck_n", "flips", "dist", "minclr", "runtime_s", "sleep_s",
@@ -218,9 +220,11 @@ def main():
                      row["stuck_s"], row["flips"], row["minclr"],
                      row["runtime_s"]), flush=True)
     finally:
+        shutil.copy(backup_cfg, CFG)   # run_seed 亦须还原（否则残留最后 cell 值）
+        os.remove(backup_cfg)
         shutil.copy(backup, RULES)
         os.remove(backup)
-        set_key_in_block(RULES, "color_id", "source", "truth")
+        set_key_in_block(RULES, "color_id", "source", "camera")  # 默认=感知链
 
     print("\n===== SUMMARY (mean per arm) =====", flush=True)
     for tag in sorted({r["tag"] for r in rows}):
