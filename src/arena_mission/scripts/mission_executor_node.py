@@ -750,6 +750,16 @@ class MissionExecutor:
             self._drop_hold = False   # 重锁平台清残留对准门（MATCH_TIMEOUT
             self._drop_align_t0 = 0.0  # 重试重降后旧 hold/时刻会立即误放行）
             self.pub_selected.publish(Int32(data=dp.id))
+            # SELECTED 上 task_update：GCS 指派栏锁定瞬间即显真桶（此前只有
+            # LANDED 带桶号）。消费端 scorekeeper(L157)/nav(L487) 均按 state
+            # 白名单过滤，SELECTED 对它们零副作用。
+            tu = TaskUpdate()
+            tu.drone_id = self.drone_id
+            tu.mission_state = "SELECTED"
+            if self.mission is not None:
+                tu.payload_type = self.mission.payload_type
+            tu.drop_point_id = dp.id
+            self.pub_task_update.publish(tu)
             self._pending = None
             self.state = "AT_DROP"
             self._publish_phase("AT_DROP")

@@ -734,7 +734,7 @@ class Panel(QMainWindow):
 
     def _set_score(self, sc, ms, tk=None, tot=None):
         """比分/任务指派条（比赛口径 S=S1+S2）：
-        S1 n | S2 n | 落 k/6 | 总 n ‖ d0 A●红→P1 ✓ (10分) [退赛]。
+        S1 n | S2 n | 落 k/6 | 总 n ‖ d0 电池●红→P2 ✓ (10分) [退赛]。
 
         sc=scores ms=missions tk=task_update 事件 tot=赛末 summary（real 无
         scorekeeper 显示 --）。富文本——所有插值字段过 escape（hub/agent
@@ -762,16 +762,22 @@ class Panel(QMainWindow):
             t = (tk or {}).get(did) or {}
             if not m and not s and not t:
                 continue
-            # 指派段：d0 A●红→P1（箱色色卡来自 Mission.box_color）
+            # 指派段：d0 电池●红→P2。类型中文名=比赛 payload 口径（箱色色卡
+            # 来自 Mission.box_color）；→P 号优先 task_update SELECTED/LANDED
+            # 事件的真锁桶，Mission.drop_point_id（参考指派）仅兜底
             ptype = str(m.get("payload") or "")
             color = str(m.get("box_color") or "")
             cname = {"red": "红", "blue": "蓝", "yellow": "黄"}.get(color, "")
             ccol = {"red": RED, "blue": "#3498db",
                     "yellow": YEL}.get(color, DIM)
-            seg = "d%s %s" % (did, escape(ptype[-1]) if ptype else "?")
+            tlast = ptype[-1:] or "?"
+            tname = {"A": "电池", "B": "药品", "C": "食品"}.get(tlast, tlast)
+            seg = "d%s %s" % (did, escape(tname))
             if cname:
                 seg += '<span style="color:%s">●%s</span>' % (ccol, cname)
-            seg += "→P%s" % escape(str(m.get("drop", "?")))
+            tdrop = t.get("drop") or None  # 0=rule_monitor RETIRED 默认值→兜底
+            seg += "→P%s" % escape(str(tdrop if tdrop is not None
+                                       else m.get("drop", "?")))
             st = str(t.get("state") or "")
             if st == "RETIRED" or (s or {}).get("retire"):
                 seg += ' <span style="color:%s"><b>[退赛]</b></span>' % RED
