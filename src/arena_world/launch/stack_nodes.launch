@@ -30,6 +30,46 @@
     <param name="drone_id" value="5"/>
   </node>
 
+  <!-- 相机颜色检测链（每机：合成渲染 + HSV 检测器，2026-09-10 相机立项）。
+       自门控：color_id.source=truth（默认）时两节点启动即退、零发布者；
+       source=camera 时真值 tag_detector 同样自门控让位——结构互斥。 -->
+  <node pkg="arena_sensor" type="camera_sim_node.py" name="camera_sim_0" output="log">
+    <param name="drone_id" value="0"/>
+  </node>
+  <node pkg="arena_sensor" type="camera_sim_node.py" name="camera_sim_1" output="log">
+    <param name="drone_id" value="1"/>
+  </node>
+  <node pkg="arena_sensor" type="camera_sim_node.py" name="camera_sim_2" output="log">
+    <param name="drone_id" value="2"/>
+  </node>
+  <node pkg="arena_sensor" type="camera_sim_node.py" name="camera_sim_3" output="log">
+    <param name="drone_id" value="3"/>
+  </node>
+  <node pkg="arena_sensor" type="camera_sim_node.py" name="camera_sim_4" output="log">
+    <param name="drone_id" value="4"/>
+  </node>
+  <node pkg="arena_sensor" type="camera_sim_node.py" name="camera_sim_5" output="log">
+    <param name="drone_id" value="5"/>
+  </node>
+  <node pkg="arena_sensor" type="color_detector_node.py" name="color_detector_0" output="log">
+    <param name="drone_id" value="0"/>
+  </node>
+  <node pkg="arena_sensor" type="color_detector_node.py" name="color_detector_1" output="log">
+    <param name="drone_id" value="1"/>
+  </node>
+  <node pkg="arena_sensor" type="color_detector_node.py" name="color_detector_2" output="log">
+    <param name="drone_id" value="2"/>
+  </node>
+  <node pkg="arena_sensor" type="color_detector_node.py" name="color_detector_3" output="log">
+    <param name="drone_id" value="3"/>
+  </node>
+  <node pkg="arena_sensor" type="color_detector_node.py" name="color_detector_4" output="log">
+    <param name="drone_id" value="4"/>
+  </node>
+  <node pkg="arena_sensor" type="color_detector_node.py" name="color_detector_5" output="log">
+    <param name="drone_id" value="5"/>
+  </node>
+
   <!-- lidar：每机 1 份模拟点云（闭环导航消费 /drone_<id>/cloud） -->
   <node pkg="arena_sensor" type="lidar_node.py" name="lidar_0" output="log">
     <param name="drone_id" value="0"/>

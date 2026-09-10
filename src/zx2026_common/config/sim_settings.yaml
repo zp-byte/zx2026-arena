@@ -3,7 +3,7 @@
 # 切换物理后端 / 保真度 / 时间管理 / 随机种子
 # =============================================================================
 
-run_seed: 42               # 一切随机种子（同 seed 可复现）
+run_seed: 45               # 一切随机种子（同 seed 可复现）
 
 # ---- 物理后端 ----------------------------------------------------------------
 backend: cascade_pid       # kinematic | cascade_pid | gazebo
@@ -475,6 +475,17 @@ sensor:
   tag:
     range_noise_std: 0.05     # 距离测量噪声 (m)，影响 confidence
     false_negative_rate: 0.05 # 漏检率，与距离成正比（越远越易漏检）
+  camera:                   # 下视相机合成图像源（camera_sim_node；唯一开关=
+                            # competition_rules.color_id.source，无独立 enabled）
+    fps: 12                 # 出图帧率（检测器按帧出检测；消费者 20Hz tick 取最新，
+                            # 重复帧等值——锁定时序由 scan_dwell_s 决定，与帧率解耦）
+    width: 320
+    height: 240
+    vfov_deg: 95.0          # 垂直 FOV：0.8m 悬停 + 0.4m 水平偏移仍含 rim r=0.68
+    gain_std: 0.06          # 每帧乘性曝光抖动
+    pixel_noise_std: 6.0    # 逐像素高斯噪声 (8-bit)
+    dropout_rate: 0.02      # 整帧丢失率（相机断帧）
+    render_crowns: false    # 树冠入画默认关=与 scene.raycast 遮挡集一致
 
 # ---- 时间管理 ----------------------------------------------------------------
 world_dt: 0.01             # 物理步进

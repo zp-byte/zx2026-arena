@@ -40,6 +40,10 @@ heights:
 # enabled=false 时逐位回退旧行为（任务直配投放点 + /detected/type 类型匹配）
 color_id:
   enabled: true
+  source: truth            
+                           # （现行为逐位）；camera=下视相机图像识别（camera_sim_node
+                           # 渲染 + color_detector HSV，真机 D435 同代码）。
+                           # source=camera 时真值 tag_detector 自门控让位。
   scan_dwell_s: 2.0        # 每平台悬停侦察最短停留(s)
   min_conf: 0.8            # 识别置信度门槛
   n_frames: 3              # 连续命中帧数（bucket_select）
@@ -59,6 +63,31 @@ color_id:
                            # goal−drift，|drift|>0.15 时真值判据永假→五机 SCAN
                            # 全超时）。伺服锁点释放 offset=|漂移|=理论下界。
                            # 旗关=回退 est 释放门+settle 窗
+  camera_detector:         # 相机检测算法参数（source=camera 时被 color_detector 消费；
+                           # 真机 D435 覆写 image_topic 并按光照重标 hsv）
+    image_topic: camera/image_raw   # 相对机 namespace；真机=/camera/color/image_raw
+    stale_s: 0.4            # 图像龄超此值判相机断链，看门狗发哨兵（NO_DET 复位）
+    min_blob_area_px: 40    # 色块噪声地板(px)：低于此判无检测
+    hsv:                    # OpenCV H 0-179 / S,V 0-255；初值由 PLATFORM_COLORS
+                            # 推导（红≈0、蓝≈109、黄≈28），camera_selftest B/D
+                            # 定稿；真机按光照重标
+      red_lo1: 0
+      red_hi1: 8
+      red_lo2: 172
+      red_hi2: 179
+      blue_lo: 100
+      blue_hi: 115
+      yellow_lo: 20
+      yellow_hi: 35
+      s_min: 120
+      v_min: 80
+    conf:                   # conf=w_circ*圆形度+w_pur*色纯度（+w_area*面积分，
+                            # 默认 0）。形状/纯度对距离与水平偏移不敏感——真机
+                            # 盘溢帧也成立；面积只作噪声地板
+      w_circularity: 0.6
+      w_purity: 0.4
+      w_area: 0.0
+      area_floor_px: 40
 
 # ---- 运动限制 ---------------------------------------------------------------
 motion:

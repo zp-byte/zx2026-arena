@@ -30,6 +30,15 @@ class TagDetectorNode:
         self.drone_id = int(rospy.get_param("~drone_id", 0))
         ns = "/drone_%d" % self.drone_id
 
+        # 相机模式自门控（2026-09-10 相机立项）：color_id.source=camera 时真值
+        # 检测器让位——在创建任何 Publisher 前退出，结构上消灭 /detected/*
+        # 双发布者竞态（camera_sim_node/color_detector_node 同款自门控）。
+        source = (cfg.load("competition_rules.yaml").get("color_id", {})
+                  .get("source", "truth"))
+        if source == "camera":
+            rospy.loginfo("tag_detector_node: disabled (color_id.source=camera)")
+            return
+
         self.scene = Scene()
         self.params = load_tag_params()
         self.rng = random.Random(self.params["rng_seed"] + self.drone_id * 7919)
@@ -56,6 +65,8 @@ class TagDetectorNode:
         pass  # 场景由 Scene() 静态构建，PoseArray 仅作同步参考
 
     def run(self):
+        if getattr(self, "scene", None) is None:   # 自门控早退（source=camera）
+            return
         rate = rospy.Rate(20)
         while not rospy.is_shutdown():
             self._publish_detection()
