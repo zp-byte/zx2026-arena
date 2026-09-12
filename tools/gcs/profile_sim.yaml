@@ -17,6 +17,11 @@ topics:
   mission: /zx2026/mission/{id}                 # 任务指派（latched，payload→投放点）
   task: /zx2026/task_update                     # 任务进度事件（TaskUpdate：LANDED/RETIRED）
   summary: /zx2026/score_summary                # 赛末总分条（latched："total=.. s1=.. s2=.."）
+  match: /drone_{id}/match/result               # std_msgs/String MATCH/TIMEOUT（FR-1.8）
+  drop_done: /drone_{id}/payload/done           # std_msgs/Bool 投放确认（FR-1.8）
+  metrics: /drone_{id}/nav_metrics              # std_msgs/Float32MultiArray 11项（FR-1.7 碰撞/clearance）
+  match_progress: /drone_{id}/match/progress    # std_msgs/String 匹配过程（FR-1.9）
+  grid_cloud: null                              # FR-1.4 sim 用 OccupancyGrid（grid 键）
 
 # GCS v0 第 2 步：操作编排（gcs_ops.py）——命令模板与门限全配置化
 ops:
@@ -36,6 +41,7 @@ ops:
   stagger_s: 2.0                                # 错峰起飞间隔
   retries: 2
   execute_timeout_s: 300.0
+  time_limit_s: 600                             # 科目总时限（FR-1.6 倒计时）
   terminal_phases: ["DONE", "FAILED", "ABORT"]  # ABORT=panic 终态（不算 FAILED）
   gates:
     link_lost_s: 3.0

@@ -19,14 +19,17 @@
   python3 gcs_panel.py --profile profile_sim.yaml
   QT_QPA_PLATFORM=offscreen python3 gcs_panel.py --profile ... --selftest
 """
+import math
 import os
+import struct
 import sys
 import time
+import wave
 from html import escape
 
 from collections import deque
 
-from PySide6.QtCore import QObject, QPointF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QPointF, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QImage, QPainter, QPalette,
                            QPixmap, QPolygonF, QPen)
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame,
@@ -118,30 +121,56 @@ class Card(QFrame):
         self.did = did
 
     def set_state(self, d, link_ok, stall_on, pdead_on, bat_on=False,
-                  score=None):
+                  score=None, coll_on=False, offboard_on=False):
         # 数据过期=NO LINK（与 hub dash 同语义：不信 TCP/旧数据）
         ph = (d or {}).get("phase") if link_ok else None
+        # FR-2.8 真机阶段推断：phase=null 时显示推断相位（~ 前缀标记）
+        if not ph and link_ok:
+            ip = (d or {}).get("inferred_phase")
+            if ip:
+                ph = "~%s" % ip
         # 退赛（rule_monitor 合规条款）整卡标红——S2 已剔除，操作员必须看见
         retired = bool(score and score.get("retire")) or ph == "RETIRED"
         self.phase.setText(str(ph) if ph else "NO LINK")
         self.phase.setStyleSheet(
             "color: %s;" % (RED if (retired or not ph) else GRN))
+        # FR-1.7 碰撞/clearance 上屏 + FR-1.9 匹配过程
+        coll = (d or {}).get("coll")
+        min_clr = (d or {}).get("min_clr")
+        match_prog = (d or {}).get("match_progress")
+        extra = ""
+        if coll:
+            extra += "  coll=%d" % coll
+        if min_clr is not None:
+            extra += "  minclr=%.2f" % min_clr
+        if match_prog:
+            extra += "  m=%s" % match_prog
         if d and d.get("pos"):
             p = d["pos"]
-            self.info.setText("pos (%.1f, %.1f, %.1f)  v %.2f"
-                              % (p[0], p[1], p[2], d.get("speed") or 0.0))
+            self.info.setText("pos (%.1f, %.1f, %.1f)  v %.2f%s"
+                              % (p[0], p[1], p[2], d.get("speed") or 0.0,
+                                 extra))
         else:
             self.info.setText("pos --  v --")
         bat = d.get("bat") if d else None
         pa = d.get("plan_age") if d else None
         age = d.get("age") if d else None
         sc_v = score.get("score") if score else None
-        self.meta.setText("bat %-4s plan %-6s age %-5s 分 %-4s"
+        # FR-1.8 投放状态
+        drop_done = bool((d or {}).get("drop_done"))
+        matched = (d or {}).get("matched")
+        drop_mark = ""
+        if drop_done:
+            drop_mark = " drop=✓"
+        elif matched is not None:
+            drop_mark = " drop=%s" % matched
+        self.meta.setText("bat %-4s plan %-6s age %-5s 分 %-4s%s"
                           % ("%.0f%%" % bat if bat is not None else "--",
                              "%.1f" % pa if pa is not None and pa >= 0
                              else "never",
                              "%.1f" % age if age is not None else "--",
-                             str(sc_v) if sc_v is not None else "--"))
+                             str(sc_v) if sc_v is not None else "--",
+                             drop_mark))
         badges = []
         if not link_ok:
             badges.append("LINK")
@@ -153,9 +182,18 @@ class Card(QFrame):
             badges.append("PLANNER")
         if bat_on:
             badges.append("BAT")
+        if coll_on:           # FR-1.7 碰撞一级告警
+            badges.append("COLL")
+        if offboard_on:       # FR-3.4 OFFBOARD 丢失一级告警
+            badges.append("OFFBOARD")
+        if bool((d or {}).get("fence_on")):  # FR-3.5 围栏越界一级告警
+            badges.append("FENCE")
         self.alarm.setText(" ".join("[%-7s]" % b for b in badges))
         self.alarm.setStyleSheet("color: %s;" % (RED if badges else DIM))
-        border = RED if (not link_ok or retired) else (YEL if badges else GRN)
+        # 一级告警（LINK/RETIRED/COLL/OFFBOARD/FENCE）=红框，黄=次级，绿=正常
+        level1 = (not link_ok) or retired or coll_on or offboard_on \
+            or bool((d or {}).get("fence_on"))
+        border = RED if level1 else (YEL if badges else GRN)
         self.setStyleSheet("QFrame#card { border: 2px solid %s; "
                            "border-radius: 8px; background: %s; }"
                            % (border, CARD_BG))
@@ -574,9 +612,17 @@ class Panel(QMainWindow):
         top = QHBoxLayout()
         self.stage_lbl = QLabel("stage --")
         self.stage_lbl.setObjectName("big")
+        self.timer_lbl = QLabel("T --")   # FR-1.6 倒计时
+        self.timer_lbl.setObjectName("big")
+        self.total_lbl = QLabel("Σ --")   # FR-1.5 总分
+        self.total_lbl.setObjectName("big")
         self.conns_lbl = QLabel("conns --")
         self.snap_lbl = QLabel("snap --")
         top.addWidget(self.stage_lbl)
+        top.addSpacing(20)
+        top.addWidget(self.timer_lbl)
+        top.addSpacing(20)
+        top.addWidget(self.total_lbl)
         top.addStretch(1)
         top.addWidget(self.conns_lbl)
         top.addWidget(self.snap_lbl)
@@ -669,6 +715,9 @@ class Panel(QMainWindow):
         self.stream = SignalStream()
         self.stream.text.connect(self.append)
 
+        # FR-7.3 一级告警声音
+        self._init_sound()
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(poll_ms)
@@ -677,6 +726,46 @@ class Panel(QMainWindow):
     # ---- 工具 --------------------------------------------------------------
     def append(self, s):
         self.log.appendPlainText(s)
+
+    # ---- FR-7.3 一级告警声音 -----------------------------------------------
+    def _init_sound(self):
+        """QtMultimedia.QSoundEffect 优先；无多媒体模块则终端响铃回退。"""
+        self._sound = None
+        try:
+            from PySide6.QtMultimedia import QSoundEffect
+            path = "/tmp/gcs_alarm_%d.wav" % os.getpid()
+            self._make_beep_wav(path)
+            snd = QSoundEffect()
+            snd.setSource(QUrl.fromLocalFile(path))
+            snd.setVolume(0.7)
+            snd.load()
+            self._sound = snd
+        except Exception:
+            self._sound = None
+
+    @staticmethod
+    def _make_beep_wav(path):
+        """合成 800Hz 0.2s 单声道正弦 wav（stdlib，无外部资产依赖）。"""
+        rate = 16000
+        dur = 0.2
+        freq = 800.0
+        n = int(rate * dur)
+        with wave.open(path, "w") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            frames = bytearray(n * 2)
+            for i in range(n):
+                v = int(32767 * 0.6 *
+                        math.sin(2 * math.pi * freq * i / rate))
+                struct.pack_into("<h", frames, i * 2, v)
+            w.writeframes(bytes(frames))
+
+    def _alarm_sound(self):
+        if self._sound is not None:
+            self._sound.play()
+        else:
+            print("\a", end="", flush=True)
 
     def _set_gates(self, res):
         for s in self.ops.stages:
@@ -806,6 +895,23 @@ class Panel(QMainWindow):
         self._set_score(sc, ms, snap.get("tasks") or {},
                         snap.get("score_total") or {})
         self._trails_add(drones, now)
+        # FR-1.6 倒计时：任务活跃阶段从 stage_t0（hub 阶段切换时刻）起算
+        stage = snap.get("stage")
+        stage_t0 = snap.get("stage_t0")
+        if stage and stage_t0:
+            remain = self.ops.time_limit_s - (now - stage_t0)
+            self.timer_lbl.setText("T+%.0f/%.0f  %.0fs"
+                                   % (now - stage_t0, self.ops.time_limit_s,
+                                      remain))
+            self.timer_lbl.setStyleSheet(
+                "color: %s;" % (RED if remain < 60 else TXT))
+        else:
+            self.timer_lbl.setText("T --")
+            self.timer_lbl.setStyleSheet("color: %s;" % DIM)
+        # FR-1.5 总分（S1+S2 合计，scorekeeper 触发后有效）
+        if sc:
+            self.total_lbl.setText("Σ %d" % sum(self._si(
+                (s or {}).get("score")) for s in sc.values()))
         for did, card in self.cards.items():
             d = drones.get(did)
             age = (d or {}).get("age")
@@ -814,10 +920,14 @@ class Panel(QMainWindow):
                            bool((d or {}).get("stall_on")),
                            bool((d or {}).get("pdead_on")),
                            bool((d or {}).get("bat_on")),
-                           score=sc.get(did))
+                           score=sc.get(did),
+                           coll_on=bool((d or {}).get("coll_on")),
+                           offboard_on=bool((d or {}).get("offboard_on")))
         res, _cur = self.ops.gates(snap)
         self._set_gates(res)
         # 事件流增量（去重：hub events 尾 50 条）
+        SOUND_EVENTS = {"COLLISION", "OFFBOARD_LOST", "LINK_LOST", "PANIC",
+                        "FENCE_BREACH", "ESTIMATOR_JUMP"}  # FR-7.3
         for ev in snap.get("events", []):
             key = (ev.get("t"), ev.get("drone"), ev.get("event"))
             if key in self.evt_seen or ev.get("event") == "TELEM":
@@ -826,6 +936,8 @@ class Panel(QMainWindow):
             self.append("[EVT] d%s %s %s" % (ev.get("drone"),
                                              ev.get("event"),
                                              ev.get("detail")))
+            if ev.get("event") in SOUND_EVENTS:   # FR-7.3 一级告警声音
+                self._alarm_sound()
         # selftest：READY 后自动 START，全部终态退出
         if self.selftest:
             self._selftest_tick(snap, res)

@@ -33,11 +33,13 @@ mode: real 的附加保护：
   python3 gcs_ops.py --profile profile_real_lio.yaml panic
 """
 import argparse
+import glob
 import json
 import math
 import os
 import shlex
 import subprocess
+import tarfile
 import time
 
 import yaml
@@ -76,6 +78,7 @@ class Ops(object):
         self.airborne_z = float(g.get("airborne_z", 0.5))
         self.airborne_timeout_s = float(g.get("airborne_timeout_s", 60.0))
         self.execute_timeout_s = float(ops.get("execute_timeout_s", 300.0))
+        self.time_limit_s = float(ops.get("time_limit_s", 600.0))  # FR-1.6
         self.terminal_phases = set(ops.get("terminal_phases",
                                            ["DONE", "FAILED"]))
         # 真机调试接口（ssh）：debug_ssh=通道模板({id})，debug_cmds=命名
@@ -85,6 +88,7 @@ class Ops(object):
         self.probe = ops.get("probe", []) or []
         self.last_results = []  # 最近一次 dispatch 的 (id, ok) 明细
         logdir = ops.get("logdir", "/home/ubuntu/zx2026_arena_ws/run_logs")
+        self.logdir = logdir
         self.logpath = "%s/gcs_ops_%s.jsonl" % (
             logdir, time.strftime("%Y%m%d_%H%M%S"))
         self.logf = open(self.logpath, "a", encoding="utf-8")
@@ -523,18 +527,46 @@ class Ops(object):
         print("  ↑ 失败修复: ssh-copy-id 发公钥; ls -d ~/Diff* 核目录大小写;"
               " 现场核实 IP 网段")
 
+    # ---- FR-5.3 取证一键导出 -----------------------------------------------
+    def export(self, out_path=None):
+        """打包 run_logs 下法证文件为 tar.gz，供赛后复盘/申诉取证。
+
+        收纳：gcs 遥测/事件/ops 流水 + hub 状态快照 + nav_metrics + 比分报告。
+        """
+        patterns = ["gcs_telem_*.jsonl", "gcs_ops_*.jsonl", "gcs_status.json",
+                    "nav_metrics_*.yaml", "nav_metrics_ts.csv",
+                    "zx2026_score_*.yaml"]
+        files = []
+        for pat in patterns:
+            files.extend(sorted(glob.glob(os.path.join(self.logdir, pat))))
+        if out_path is None:
+            out_path = os.path.join(
+                self.logdir, "gcs_export_%s.tar.gz"
+                % time.strftime("%Y%m%d_%H%M%S"))
+        n = 0
+        with tarfile.open(out_path, "w:gz") as tar:
+            for fp in files:
+                if os.path.isfile(fp):
+                    tar.add(fp, arcname=os.path.basename(fp))
+                    n += 1
+        print(" EXPORT %s — %d files -> %s" % (self.logdir, n, out_path))
+        self.log("EXPORT", out=out_path, n=n)
+        return out_path
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", required=True)
     ap.add_argument("action",
                     choices=["status", "preflight", "start", "takeoff",
-                             "back", "land", "panic", "debug"])
+                             "back", "land", "panic", "debug", "export"])
     ap.add_argument("debug_name", nargs="?", default=None,
                     help="debug 子命令名（无参=list 可用命令）")
     ap.add_argument("debug_args", nargs="?", default=None,
                     help="debug 命令的 {args} 参数")
     ap.add_argument("--ids", default=None, help="逗号分隔，缺省=全队")
+    ap.add_argument("--out", default=None,
+                    help="export 输出路径（缺省 run_logs/gcs_export_<ts>.tar.gz）")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--yes", action="store_true",
                     help="real 模式危险命令确认（面板两段确认后代传）")
@@ -596,6 +628,9 @@ def main():
     if args.action == "debug":
         raise SystemExit(ops.debug_cli(args.debug_name, args.debug_args,
                                        ids=args.ids))
+    if args.action == "export":
+        ops.export(args.out)
+        return
     # takeoff / back / land：逐机命令
     ids = args.ids.split(",") if args.ids else ops.ids
     ok = ops.dispatch(args.action, ids=ids)

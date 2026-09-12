@@ -25,7 +25,7 @@ import time
 import rospy
 import yaml
 from nav_msgs.msg import Odometry, OccupancyGrid
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool, Float32MultiArray
 
 
 class Agent(object):
@@ -47,7 +47,13 @@ class Agent(object):
     def _blank():
         return {"pos": None, "yaw": None, "vel": [0.0, 0.0, 0.0], "speed": 0.0,
                 "bat": None, "bat_v": None, "fc": None, "connected": None,
-                "phase": None, "plan_age": -1.0, "live_t": {}, "prev": None}
+                "phase": None, "plan_age": -1.0, "live_t": {}, "prev": None,
+                # FR-1.7 碰撞/clearance（nav_metrics 11 项布局，取 0/6 两项）
+                "coll": 0, "min_clr": None,
+                # FR-1.8 投放事件/首投时间戳
+                "matched": None, "drop_done": False, "first_drop_t": None,
+                # FR-1.9 匹配过程可视化
+                "match_progress": None}
 
     # ---- ROS 采集 ----------------------------------------------------------
     def spin_ros(self):
@@ -77,6 +83,28 @@ class Agent(object):
             if self.tp.get("grid"):
                 rospy.Subscriber(self.tp["grid"].format(id=i), OccupancyGrid,
                                  self._on_grid, i, queue_size=1)
+            # FR-1.8 投放事件 / FR-1.9 匹配过程 / FR-1.7 碰撞指标（sim 先通）
+            if self.tp.get("match"):
+                rospy.Subscriber(self.tp["match"].format(id=i), String,
+                                 self._on_match, i, queue_size=1)
+            if self.tp.get("drop_done"):
+                rospy.Subscriber(self.tp["drop_done"].format(id=i), Bool,
+                                 self._on_drop_done, i, queue_size=1)
+            if self.tp.get("metrics"):
+                rospy.Subscriber(self.tp["metrics"].format(id=i),
+                                 Float32MultiArray, self._on_metrics, i,
+                                 queue_size=1)
+            if self.tp.get("match_progress"):
+                rospy.Subscriber(self.tp["match_progress"].format(id=i),
+                                 String, self._on_match_progress, i,
+                                 queue_size=1)
+            # FR-1.4 真机建图：PointCloud2 → RLE 栅格（sim 用 OccupancyGrid，
+            # 此键 null；真机 LIO/VIO 累积点云现场定 topic 后填入）
+            if self.tp.get("grid_cloud"):
+                from sensor_msgs.msg import PointCloud2
+                rospy.Subscriber(self.tp["grid_cloud"].format(id=i),
+                                 PointCloud2, self._on_grid_cloud, i,
+                                 queue_size=1)
         stp = self.tp.get("stage")
         if stp:
             rospy.Subscriber(stp, String, self._on_stage, queue_size=2)
@@ -197,10 +225,61 @@ class Agent(object):
             with self.lock:
                 self.score_total = d
 
+    # ---- FR-1.8/1.9/1.7 采集（随流捎带到地面站，只读） ----------------------
+    def _on_match(self, msg, i):
+        with self.lock:
+            self.state[i]["matched"] = str(msg.data)
+
+    def _on_drop_done(self, msg, i):
+        if not msg.data:
+            return
+        now = time.time()
+        with self.lock:
+            st = self.state[i]
+            st["drop_done"] = True
+            if st["first_drop_t"] is None:
+                st["first_drop_t"] = now
+
+    def _on_metrics(self, msg, i):
+        # 布局：0 碰撞 1 卡滞s 2 卡滞段 3 最长卡滞 4 翻转 5 距离 6 min_clear
+        #       7 max_speed 8 sim_t 9 speed 10 clear
+        d = msg.data
+        if len(d) < 7:
+            return
+        with self.lock:
+            st = self.state[i]
+            st["coll"] = int(d[0])
+            st["min_clr"] = round(float(d[6]), 3)
+
+    def _on_match_progress(self, msg, i):
+        with self.lock:
+            self.state[i]["match_progress"] = str(msg.data)
+
     def _on_live(self, _msg, key):
         i, _k = key
         with self.lock:
             self.state[i]["live_t"]["plan"] = time.time()
+
+    @staticmethod
+    def _rle_encode(values):
+        """值序列(0/1/2) → RLE bytes → base64 str（游程 ≤255）。
+
+        值域 0=空闲/1=占用/2=未知。OccupancyGrid 和 PointCloud2 栅格化共用。
+        """
+        out = bytearray()
+        prev, run = -1, 0
+        for v in values:
+            if v == prev and run < 255:
+                run += 1
+            else:
+                if prev >= 0:
+                    out.append(prev)
+                    out.append(run)
+                prev, run = v, 1
+        if prev >= 0:
+            out.append(prev)
+            out.append(run)
+        return base64.b64encode(bytes(out)).decode("ascii")
 
     @staticmethod
     def _rle_grid(msg):
@@ -211,28 +290,51 @@ class Agent(object):
         未知(-1)单列一值：大图可区分"已探索空地"与"未探索"。
         """
         w, h = int(msg.info.width), int(msg.info.height)
-        out = bytearray()
-        prev, run = -1, 0
-        for v in msg.data:
-            b = 1 if v > 50 else (2 if v < 0 else 0)
-            if b == prev and run < 255:
-                run += 1
-            else:
-                if prev >= 0:
-                    out.append(prev)
-                    out.append(run)
-                prev, run = b, 1
-        if prev >= 0:
-            out.append(prev)
-            out.append(run)
+        values = [1 if v > 50 else (2 if v < 0 else 0) for v in msg.data]
         return {"w": w, "h": h, "res": float(msg.info.resolution),
                 "x0": float(msg.info.origin.position.x),
                 "y0": float(msg.info.origin.position.y),
-                "rle": base64.b64encode(bytes(out)).decode("ascii")}
+                "rle": Agent._rle_encode(values)}
 
     def _on_grid(self, msg, i):
         try:
             g = self._rle_grid(msg)
+        except Exception:
+            return
+        with self.lock:
+            self.grids[i] = g
+
+    def _on_grid_cloud(self, msg, i):
+        """FR-1.4 真机建图：PointCloud2 → x-y 投影 → 0.5m 栅格 → RLE。
+
+        真机 LIO/VIO 累积点云→2D 占用栅格，与 sim OccupancyGrid 同格式输出，
+        面板地图窗零改动。z 过滤 [0.3, 4.0] 取地面以上树冠以下点。
+        """
+        try:
+            from sensor_msgs import point_cloud2
+            pts = list(point_cloud2.read_points(
+                msg, field_names=("x", "y", "z"), skip_nans=True))
+            pts = [p for p in pts if 0.3 <= p[2] <= 4.0]
+            if not pts:
+                return
+            res = 0.5
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            x0 = math.floor(min(xs) / res) * res
+            y0 = math.floor(min(ys) / res) * res
+            w = int(math.ceil((max(xs) - x0) / res)) + 1
+            h = int(math.ceil((max(ys) - y0) / res)) + 1
+            if w <= 0 or h <= 0 or w * h > 4000000:
+                return
+            # 栅格化：有点的格=占用(1)，无点=未知(2)
+            cells = [2] * (w * h)
+            for p in pts:
+                cx = int((p[0] - x0) / res)
+                cy = int((p[1] - y0) / res)
+                if 0 <= cx < w and 0 <= cy < h:
+                    cells[(h - 1 - cy) * w + cx] = 1  # 行翻转：原点左下
+            g = {"w": w, "h": h, "res": res, "x0": x0, "y0": y0,
+                 "rle": self._rle_encode(cells)}
         except Exception:
             return
         with self.lock:
@@ -281,6 +383,11 @@ class Agent(object):
                     "fc": st["fc"], "connected": st["connected"],
                     "phase": st["phase"], "ts": lt.get("odom", 0.0),
                     "plan_age": (now - lt["plan"]) if "plan" in lt else -1.0,
+                    # FR-1.7/1.8/1.9 新增字段（随流捎带，hub 透出到面板）
+                    "coll": st["coll"], "min_clr": st["min_clr"],
+                    "matched": st["matched"], "drop_done": st["drop_done"],
+                    "first_drop_t": st["first_drop_t"],
+                    "match_progress": st["match_progress"],
                 }
             grids = {i: g for i, g in self.grids.items() if g is not None}
             scores = dict(self.scores)

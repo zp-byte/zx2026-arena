@@ -22,6 +22,11 @@ topics:
                               #   (需独立适配器), 与仿真 OccupancyGrid 不同型
   score: null                 # 真机无 scorekeeper——比分条显示 --
   mission: null               # 真机任务指派 multipoint points.yaml 内部持有
+  match: null                 # TODO 真机类型匹配适配器（FR-1.8）
+  drop_done: null             # TODO 真机投放确认适配器（FR-1.8）
+  metrics: null               # 真机无 nav_metrics（FR-1.7 sim 专属）
+  match_progress: null        # TODO 真机匹配进度适配器（FR-1.9）
+  grid_cloud: null            # TODO 现场定 LIO 累积点云 topic（FR-1.4 real 建图）
 
 # GCS 操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
 # 脚本语义（sh_files 源码核实）: takeoff/land = /px4ctrl/takeoff_land cmd 1/2；
@@ -72,6 +77,7 @@ ops:
   stagger_s: 2.0
   retries: 2
   execute_timeout_s: 600.0
+  time_limit_s: 600              # 科目总时限（FR-1.6 倒计时）
   gates:
     link_lost_s: 3.0
     max_vel: 0.10
