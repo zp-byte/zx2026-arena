@@ -11,6 +11,7 @@
 - **双物理后端**：轻量 Python 运动学后端（`world_node`）与 Gazebo 物理后端（`gzserver` ODE + 自研 `libdrone_vel_plugin`），两者共享同一消息契约，任务/评分代码零改动切换。
 - **在线建图闭环导航（默认）**：lidar 点云 → 累积成全局持久占用栅格（SLAM 式，含滑窗剪枝与碰撞标记）→ 2.5D A* 重规划 → P 位置环。定位带随机游走漂移，导航只消费 `est_pose` 与自建地图，**不读场景真值**（真值 A* 保留为 god-mode 备胎：`closed_loop.enabled: false`）。
 - **反应层防御栈（W1-W5 稳健化战役产物）**：机间分离障碍护栏、云避障符号修复、返航塌缩卫兵、救援互斥、STALL 看门狗、退出迟滞——每个机制独立配置开关、A/B 矩阵验证后翻默认。
+- **真机树枝避障（O1-O4，双层开关默认关）**：`branches.enabled`（场景枝生成）+ `closed_loop.branch_handling`（处理层）。证据积分判占（窗口遗忘→近/远档密度线，细枝稀疏回波落 UNC 不封格）+ 不确定跨格限速（O4，可生存接触）+ 反应层枝带放宽与地面地板（`ca_z_floor`）+ de 逃逸云推豁免；`map_z_band` 下限 > 围栏顶 1.30 为硬不变量（违者围栏封死全局→OOB）。矩阵 `matrix_branch_20260913_104132`：带枝场景 B 臂 3/3 满分 100、六机全落，反超无枝 A 臂（75.0）。
 - **6 机集群（Boids 速度层）**：分离 + 对齐 + 聚合（`swarm` 段，默认开）；静态编队 `formation.yaml` 退居备选、与群集互斥。
 - **科目三比赛口径闭环（默认开）**：三桶（红/蓝/黄）无先验指派——机载侦察悬停扫描 → 颜色检测流 `bucket_select` 连续帧确认锁平台 → 精对准释放（真值 offset 0.07-0.38，判线 0.6）；S1 投放 60 + S2 限时降落 40 真计分；`rule_monitor` 退赛合规（出界/计划外落地/超高/返航走廊）。旗关逐位回退类型直配旧模式。
 - **地面站（GCS）**：机载 agent + 地面聚合 hub + 操作编排 + PySide6 面板 + 全局 PANIC 急停（六机同帧 ABORT）+ 六机合并建图态势图 + 比分/任务指派上屏 + 真机 ssh 调试窗（见下文 [GCS 三部曲](#gcs-三部曲toolsgcs)）。
@@ -31,7 +32,7 @@
 | `arena_mission` | 任务状态机（`mission_executor_node`：RECON 闭环侦察→锁平台→对准释放→返航落地）、任务生成、类型匹配（fallback）、投放模拟、阶段控制 |
 | `arena_score` | 计分（`scorekeeper_node`：S1 真值判桶 + S2 落地阶梯 + 封卷语义）、退赛合规监视（`rule_monitor_node`） |
 
-工具：`tools/` 下有各战役的自检/矩阵脚本（`w5_selftest.py`、`w5_matrix_run.py` 等）、科目三回归链（`matrix_rule_run.py` 3-seed 矩阵 / `rule_selftest.py` 离线自检 / `baseline_rules0.py` 基线冻结）与 `tools/gcs/` 地面站全家桶、`tools/fleet_monitor.py` 机群实时监测。
+工具：`tools/` 下有各战役的自检/矩阵脚本（`w5_selftest.py`、`w5_matrix_run.py` 等）、科目三回归链（`matrix_rule_run.py` 3-seed 矩阵 / `rule_selftest.py` 离线自检 / `baseline_rules0.py` 基线冻结）、树枝避障链（`matrix_branch_run.py` A/B 3-seed 矩阵 / `bh_selftest.py` 19 断言 / `branch_selftest.py` 9 断言）与 `tools/gcs/` 地面站全家桶、`tools/fleet_monitor.py` 机群实时监测。
 
 ---
 
@@ -92,7 +93,7 @@ bash tools/viz_run.sh                 # 推荐（WSLg 软渲染）
 bash run_verify.sh
 ```
 
-自动完成：清旧进程 → 启动全栈 → 等待节点就绪 → 跑 `verify_run.py`（**180s 比赛口径**；真机 25min=1500s，部署前改回 `competition_rules.yaml → time_limit_s`）→ 校验 **state DONE 封卷落盘、零退赛、≥1 机落地**（六机全 DONE 为 FULL 档对照）。**满分 100 = S1 投放 60 + S2 限时降落 40**；当前状态：**3-seed 矩阵全满分 100、landed=6、col=0、done≈155s**。
+自动完成：清旧进程 → 启动全栈 → 等待节点就绪 → 跑 `verify_run.py`（**180s 比赛口径**；真机 25min=1500s，部署前改回 `competition_rules.yaml → time_limit_s`）→ 校验 **state DONE 封卷落盘、零退赛、≥1 机落地**（六机全 DONE 为 FULL 档对照）。**满分 100 = S1 投放 60 + S2 限时降落 40**；当前状态：**3-seed 矩阵全满分 100、landed=6、col=0、done≈155s**；带枝场景（`tools/matrix_branch_run.py`）B 臂 3/3 满分 100、六机全落、零退赛。
 
 > **同 seed 方差纪律**：单 run PASS/FAIL 有随机方差（W4 族冻结为小概率事件），机制 A/B 必须用同 seed 矩阵（`tools/matrix_rule_run.py` / `tools/w5_matrix_run.py`）+ 触发日志证据判定，禁止单局定论。
 
@@ -131,6 +132,7 @@ bash run_verify.sh
 | `rescue_mutex` + `bounce_corridor` | de/GOAL-SEAL 双救援打架仲裁 | 开 |
 | STALL 看门狗 | 规划健康+机体冻结 2s 诊断 | 开 |
 | 死端逃逸三层 + `exit_hyst_s` | 死端 flap 结构性消除 | 开 |
+| `branch_handling`（O1-O4） | 真机树枝：证据积分判占 + 不确定减速 + 反应层枝带放宽/地面地板 + 逃逸云推豁免（需 `branches.enabled` 场景配枝） | 关（枝场景开） |
 | P1 路径粘滞/翻转锁定 | 路径抖动 | 关（A/B 无净差异） |
 | `drift_aware_margin`（dam） | 漂移裕度侵蚀 | 关（v2 教训：贴脸减速=延长暴露） |
 | `near_stop_zone` | 近停区地板衰减 | 关（无净差异） |
@@ -192,6 +194,7 @@ python3 tools/gcs/gcs_ops.py --profile tools/gcs/profile_sim.yaml start &
 | W3 返航冻结 | 前瞻航点=自身伺服自锁 | collapse_guard | 6 起实弹零误触发 |
 | W4 交付死亡 | plan 健康+cmd 活+机体冻（CG 零触发） | **未破案**，签名已归档，活体取证口诀在案 | 小概率方差 |
 | W5 围栏吸引子 | 云避障符号反转（四起"幻影墙"全是围栏顶楔死） | sign_fix | A/B 决定性，翻默认 |
+| 树枝 O1-O4 | 三连根因：围栏顶进建图带=全局封死（OOB）；反应层 hband 拉进地面点=悬停地板（landed 0）；包围枝云下 sign_fix 指令对消=cmd≈0 不动点（逃逸被吞）；另 collision recovery=false 碰一次永冻 | map_z_band 下限>围栏顶+ca_z_floor 地板+逃逸云推豁免+recovery 翻默认 | B 臂 3/3 满分 100、landed 6/6/6，反超无枝 A 臂 |
 
 每案方法论：活体/法证取证 → 根因（非现象）→ selftest 数值复现 → 同 seed A/B 矩阵 → 触发日志证据 → 翻默认 → 提交推送。
 
@@ -229,7 +232,7 @@ python3 tools/gcs/gcs_ops.py --profile tools/gcs/profile_sim.yaml start &
 
 ## 已知约束
 
-- **碰撞即终结**：`world_node` 对任意碰撞（障碍或机间 `d < 2×机半径`）置 `collided=True` 并冻结速度——导航必须**预防**碰撞，`world_node` 是兜底而非避让。请勿改为非致命。
+- **碰撞语义（恢复式）**：碰撞仍是保真度信号——`world_node` 检出碰撞（障碍或机间 `d < 2×机半径`）后走 `collision.recovery` 恢复序列（弹开 1s @2m/s → 冷却 2s → 交还 nav；恢复期 `lock_cmd` 隔离执行器指令），单机累计超 `max_collisions=8` 才永久冻结。导航目标仍是**预防**碰撞（恢复只是不让一次接触终结任务；碰撞计数与 minclr 是调参依据），勿把恢复机制当避让用。旧行为（一次碰撞即永久冻、无日志）`recovery.enabled: false` 可回退。
 - **同 seed 方差**：单 run 有小概率 W4 族冻结，机制判定必须多 run 矩阵 + 触发日志。
 - 9P/UNC 路径编辑 `.py` 会重置可执行位，`run_verify.sh` 启动前已自动 `chmod +x`；`tools/gcs/` 下脚本编辑后需手动 `chmod +x`（roslaunch 找不到 node 的 "Cannot locate node" 多半是它）。
 - 调试日志 `/tmp/zx2026_smoke.log` 含 ROS 颜色码，`grep` 需加 `-a`。
