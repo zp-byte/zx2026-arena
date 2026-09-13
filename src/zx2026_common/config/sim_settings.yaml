@@ -528,7 +528,11 @@ branches:
 # enabled=false 回退到原行为（碰撞后永久冻结）。
 collision:
   recovery:
-    enabled: false             # false=永久冻结（原行为）
+    # true=弹开→冷却→恢复（风场时代调参验证过的序列，R1: max_collisions 3→5→8）。
+    # 20260913 树枝矩阵 095951 定谳：false 时一次碰撞=无日志永久冻结，B 臂全部
+    # match 缺口（B42 d3/B43 d0/B44 d3d4 碰枝 z≈1.8）皆此因——枝带与巡航 1.8
+    # 重叠，穿越必有接触风险，碰一次即冻死与"可生存接触"的 O4 设计矛盾。
+    enabled: true
     bounce_dt: 1.0            # 弹开阶段持续 (s)
     cooldown_dt: 2.0          # 冷却冻结阶段 (s)，弹开后悬停等待
     bounce_vel: 2.0           # 弹开速度 (m/s)，≤ cascade_pid.max_vel (2.5)

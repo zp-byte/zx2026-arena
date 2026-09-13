@@ -165,10 +165,17 @@ def _run_once(cell, outdir):
             pass
     if ymls:
         shutil.copy(ymls[-1], os.path.join(outdir, "nav_metrics.yaml"))
-    scores = glob.glob("/tmp/zx2026_score_*.yaml")
+    # 权威分取封卷 report 的 total：score_summary 行会被末段 per-drone 摘要
+    # 覆盖，total= 正则会落空（同 matrix_branch_run 095951 score=-1 根因）
+    scores = [p for p in glob.glob("/tmp/zx2026_score_*.yaml")
+              if os.path.getmtime(p) >= t0]   # 只认本 run 落盘的 report
     if scores:
-        shutil.copy(max(scores, key=os.path.getmtime),
-                    os.path.join(outdir, "score.yaml"))
+        latest = max(scores, key=os.path.getmtime)
+        shutil.copy(latest, os.path.join(outdir, "score.yaml"))
+        try:
+            row["score"] = int(yaml.safe_load(open(latest))["total"])
+        except Exception as e:
+            print("score.yaml parse fail:", e, flush=True)
     return row, drift
 
 
