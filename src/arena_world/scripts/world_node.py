@@ -247,6 +247,65 @@ class WorldNode:
         self.sim_t = 0.0
         return EmptyResponse()
 
+    def _safe_bounce_dir(self, i, p, pref, v0_along=0.0):
+        """障碍感知弹向：首选方向 pref（反向/互撞远离/竖直兜底）被挡时换向。
+
+        173500 A44 d1 法证两形态：①反向弹开 1.6m 甩进树干（撞深 27cm，
+        bounce 期内二次碰撞）；②恢复点在树干包络内+零指令 → 竖直兜底弹开
+        仍撞同一树干高位段（z 1.80→3.55 三连碰）。候选 = pref + 16 水平环
+        （保 pref 的 z 分量；pref 近竖直时水平环 z=0 纯水平脱出）+ 竖直上。
+        硬否决 = 沿向 0.75/1.25/1.75/尾档 采样 scene.collides（撞点必在
+        接触包络内，近场采样跳过）或前方 1.5m 内近邻（与邻机投影同 ~72° 锥）。
+        尾档自适应：弹开+冷却 3s 碰撞检测整体豁免、只有恢复点复查，
+        cascade_pid 停距随初速变化（审查后端实测：逆弹 v0=-1.8 → 0.68m、
+        悬停 1.936m、顺弹 +1.8 → 3.19m，斜率 ~0.7），尾档 = 2.25 +
+        0.75*max(0, v0_along) 截 3.6——v0_along = 碰撞时刻速度在弹向上的
+        分量（障碍弹向≈逆运动恒 ≤0 档；互撞被追尾顺弹最长，B44 活例 d4
+        弹尾 z3.18 撞干即尾段漏检）。
+        评分 = 与 pref 点积（换向最小偏转）。全否决退回 pref——不劣于原
+        行为；pref 清晰时逐位返回 pref = 已验证行为零扰动。"""
+        tail = min(3.6, 2.25 + 0.75 * max(0.0, float(v0_along)))
+
+        def blocked(dv):
+            for k in (0.75, 1.25, 1.75, tail):
+                q = (p[0] + dv[0] * k, p[1] + dv[1] * k, p[2] + dv[2] * k)
+                if self.scene.collides(q):
+                    return True
+            for j, od in self.drones.items():
+                if j == i:
+                    continue
+                op = od.state().pos
+                ex, ey = op[0] - p[0], op[1] - p[1]
+                en = math.hypot(ex, ey)
+                if en < 1e-3 or en > 1.5:
+                    continue
+                if ex * dv[0] + ey * dv[1] > 0.3 * en:
+                    return True
+            return False
+
+        if not blocked(pref):
+            return pref
+        hz = math.hypot(pref[0], pref[1])
+        cands = []
+        if hz < 0.3:
+            cands.append(np.array([0.0, 0.0, 1.0]))
+            for k in range(16):
+                th = 2.0 * math.pi * k / 16
+                cands.append(np.array([math.cos(th), math.sin(th), 0.0]))
+        else:
+            for k in range(16):
+                th = 2.0 * math.pi * k / 16
+                cands.append(np.array([math.cos(th) * hz, math.sin(th) * hz,
+                                       pref[2]]))
+        best, best_s = None, -2.0
+        for c in cands:
+            if blocked(c):
+                continue
+            s = float(c @ pref)
+            if s > best_s:
+                best_s, best = s, c
+        return best if best is not None else pref
+
     # ---------------------------------------------------------------- main loop
     def run(self):
         rate = rospy.Rate(1.0 / self.world_dt)
@@ -306,9 +365,13 @@ class WorldNode:
                                         perp @ np.array(rev)) >= 0.0 else -perp
                                 else:
                                     bdir = bdir / nb
-                        d._bounce_dir = bdir * d._bounce_vel
                     else:
-                        d._bounce_dir = np.array([0.0, 0.0, d._bounce_vel])
+                        bdir = np.array([0.0, 0.0, 1.0])
+                    # 障碍感知弹向：反向/竖直兜底被障碍挡住时换向（173500
+                    # A44 d1 撞干三连碰两形态）。pref 清晰时逐位原行为。
+                    # 尾档随碰撞时刻速度自适应（障碍弹向≈逆运动，恒 ≤0 档）。
+                    d._bounce_dir = self._safe_bounce_dir(
+                        i, p, bdir, float(d.state().vel @ bdir)) * d._bounce_vel
                     if self._low_bounce_up and p[2] < 1.0 and d._bounce_dir[2] < 0.0:
                         # 低空弹开钳位：见 __init__ 注释
                         d._bounce_dir[2] = -d._bounce_dir[2]
@@ -337,11 +400,18 @@ class WorldNode:
                         dk = self.drones[k]
                         if dk._collision_t < 0:
                             other = i if k == j else j
-                            away = (q[0] - states[other].pos[0],
-                                    q[1] - states[other].pos[1], 0.0)
+                            qk = dk.state().pos_tuple()
+                            away = (qk[0] - states[other].pos[0],
+                                    qk[1] - states[other].pos[1], 0.0)
                             dk._collision_t = self.sim_t
                             dk._collision_count += 1
-                            dk._bounce_dir = np.array(geo.normalize(away)) * dk._bounce_vel
+                            # 障碍感知弹向（与障碍弹开同构）：远离对方的方向
+                            # 若甩向障碍物则换向；对方在 1.5m 外不触发邻机否决。
+                            # 尾档自适应：被追尾者顺弹位移最长（+1.8m/s → 3.19m）。
+                            au = np.array(geo.normalize(away))
+                            dk._bounce_dir = self._safe_bounce_dir(
+                                k, qk, au,
+                                float(dk.state().vel @ au)) * dk._bounce_vel
 
         # 步进（碰撞恢复：弹开 → 冷却 → 恢复，替代永久冻结）
         for d in self.drones.values():

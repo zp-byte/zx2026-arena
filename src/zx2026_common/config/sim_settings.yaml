@@ -452,7 +452,7 @@ closed_loop:
   # 【默认全关】W 系基线 A/B 纪律：任何单旗翻默认须矩阵过线（col 不增 +
   # 无任务级退化）。branch_handling.enabled=false 时 nav 侧逐位原行为。
   branch_handling:
-    enabled: false          # O1-O5 总开关（false=现行逻辑逐位不变）
+    enabled: true          # O1-O5 总开关（false=现行逻辑逐位不变）
     # O2 点云高度带：band 为 [z_lo, z_hi] 绝对高度（ground_z 相对，见
     # nav_node 转换）。下限 1.45 = 围栏顶 1.30 + 0.15 裕度——【硬不变量】
     # 下限不得低于围栏顶：围栏环（西 x≈-18.6 跨 y±15.5、南北沿 geofence 边、
@@ -516,7 +516,7 @@ closed_loop:
 # 逐位一致，branch_selftest 对照实证）；同布局不同枝形，A/B 跨 seed 有变异。
 # 真机算法侧开关=closed_loop.branch_handling。
 branches:
-  enabled: false
+  enabled: true
   per_tree: [3, 5]          # 每树枝数（含空树）
   z_range: [0.8, 2.6]       # 枝下沿-上沿 (m，ground 相对)
   len_range: [0.6, 1.6]     # 枝长 (m)
