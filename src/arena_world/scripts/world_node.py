@@ -282,7 +282,31 @@ class WorldNode:
                     speed = float(np.linalg.norm(d.cmd_vel))
                     if speed > 0.01:
                         rev = (-d.cmd_vel[0], -d.cmd_vel[1], -d.cmd_vel[2])
-                        d._bounce_dir = np.array(geo.normalize(rev)) * d._bounce_vel
+                        bdir = np.array(geo.normalize(rev))
+                        # 邻机感知弹向：反向弹开若指向 1.5m 内近邻（前方 ~72° 锥）
+                        # 则投影掉朝邻机分量再归一——弹开甩进邻机是机间互撞主源
+                        # （104132 B44：d4 撞枝后反向弹开，1m 外正撞 d3）。z 分量
+                        # 不受投影影响；多邻机顺序投影。正对退化取水平侧向。
+                        for j, od in self.drones.items():
+                            if j == i:
+                                continue
+                            op = od.state().pos
+                            dxy = (op[0] - p[0], op[1] - p[1])
+                            dn = math.hypot(dxy[0], dxy[1])
+                            if dn < 1e-3 or dn > 1.5:
+                                continue
+                            nhat = np.array([dxy[0] / dn, dxy[1] / dn, 0.0])
+                            along = float(bdir @ nhat)
+                            if along > 0.3:
+                                bdir = bdir - along * nhat
+                                nb = float(np.linalg.norm(bdir))
+                                if nb < 0.2:
+                                    perp = np.array([-nhat[1], nhat[0], 0.0])
+                                    bdir = perp if float(
+                                        perp @ np.array(rev)) >= 0.0 else -perp
+                                else:
+                                    bdir = bdir / nb
+                        d._bounce_dir = bdir * d._bounce_vel
                     else:
                         d._bounce_dir = np.array([0.0, 0.0, d._bounce_vel])
                     if self._low_bounce_up and p[2] < 1.0 and d._bounce_dir[2] < 0.0:
