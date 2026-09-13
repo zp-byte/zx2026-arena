@@ -23,7 +23,8 @@ class Obstacle:
     """
 
     __slots__ = ("lo", "hi", "kind", "id",
-                 "cx", "cy", "trunk_r", "trunk_h", "crown_r", "crown_z")
+                 "cx", "cy", "trunk_r", "trunk_h", "crown_r", "crown_z",
+                 "branches")
 
     def __init__(self, lo, hi, kind="tree", oid=0):
         self.lo = lo
@@ -37,6 +38,7 @@ class Obstacle:
         self.trunk_h = None
         self.crown_r = None
         self.crown_z = None
+        self.branches = None  # 细枝列表 [(sx,sy,sz,ex,ey,ez,r),...]，真机场景建模
 
 
 class Zone:
@@ -121,6 +123,15 @@ class Scene:
         transit = self.zones.get("transit")
         self.obstacles = []
         self.rng = random.Random(self._forest_seed())
+        # 仿真树枝层（真机场景建模；sim_settings branches.enabled 默认关=无枝基线）
+        sim = cfg.load("sim_settings.yaml")
+        self.branch_cfg = sim.get("branches", {}) or {}
+        self.branch_cfg_enabled = bool(self.branch_cfg.get("enabled", False))
+        # 独立随机流：枝绝不扰动森林 rng 流（否则同 seed 树干位漂移——
+        # branch_selftest 对照场景实证；同 seed 有枝/无枝场景必须逐位一致）。
+        # 种子=森林种子×run_seed：同布局不同枝形，A/B 跨 seed 有布局变异。
+        rs = int(sim.get("run_seed", 42))
+        self.br_rng = random.Random(self._forest_seed() * 100003 + rs * 17)
         self._gen_forest(transit)
         self._load_static_obstacles()
 
@@ -214,6 +225,7 @@ class Scene:
                     ob.trunk_h = h
                     ob.crown_r = crown_r
                     ob.crown_z = gz + h  # 球冠球心在树干顶，冠体延伸到 ~h+crown_r
+                    self._decorate_tree(ob)
                     self.obstacles.append(ob)
                     oid += 1
             return
@@ -245,6 +257,7 @@ class Scene:
             ob.trunk_h = h
             ob.crown_r = crown_r
             ob.crown_z = gz + h
+            self._decorate_tree(ob)
             self.obstacles.append(ob)
             oid += 1
         for _ in range(int(f.get("n_bushes", 120))):
@@ -260,6 +273,39 @@ class Scene:
             hi = (x + w / 2, y + w / 2, self.venue["ground_z"] + h)
             self.obstacles.append(Obstacle(lo, hi, "bush", oid))
             oid += 1
+
+    def _decorate_tree(self, ob):
+        """按 sim_settings branches 段给树干附细枝（世界系线段+半径）。
+
+        默认关（无枝基线逐位不变）；开时每树确定性生成（独立 br_rng 流，
+        不扰动森林 rng——见 __init__ 注释）。枝参与 raycast / collides /
+        collides_xy（感知+硬碰撞），球冠仍仅视觉不动（设计律）。"""
+        if not self.branch_cfg_enabled:
+            return
+        per = self.branch_cfg.get("per_tree", [3, 5])
+        n = self.br_rng.randint(int(per[0]), int(per[1]))
+        zr = self.branch_cfg.get("z_range", [0.8, 2.6])
+        lr = self.branch_cfg.get("len_range", [0.6, 1.6])
+        rr = self.branch_cfg.get("r_range", [0.008, 0.022])
+        er = self.branch_cfg.get("el_range", [-0.5, 0.3])
+        gz = self.venue["ground_z"]
+        brs = []
+        for _ in range(n):
+            az = self.br_rng.uniform(0.0, 2.0 * math.pi)
+            el = self.br_rng.uniform(float(er[0]), float(er[1]))
+            ln = self.br_rng.uniform(float(lr[0]), float(lr[1]))
+            r = self.br_rng.uniform(float(rr[0]), float(rr[1]))
+            z0 = self.br_rng.uniform(float(zr[0]), float(zr[1]))
+            # 起点在树干表面，方向水平略下倾（常见枝形）
+            sx = ob.cx + math.cos(az) * ob.trunk_r
+            sy = ob.cy + math.sin(az) * ob.trunk_r
+            sz = gz + z0
+            dx = math.cos(el) * math.cos(az)
+            dy = math.cos(el) * math.sin(az)
+            dz = math.sin(el)
+            brs.append((sx, sy, sz,
+                        sx + dx * ln, sy + dy * ln, sz + dz * ln, r))
+        ob.branches = brs or None
 
     def _load_static_obstacles(self):
         for sob in self.scene_cfg.get("static_obstacles", []):
@@ -329,6 +375,12 @@ class Scene:
                 # 树干：球 vs 竖直圆柱；球冠不参与硬碰撞
                 if self._collides_trunk(pos, radius, ob):
                     return True
+                if ob.branches:
+                    # 细枝：球 vs 线段圆柱（真机场景；默认无枝不生效）
+                    for (sx, sy, sz, ex, ey, ez, br) in ob.branches:
+                        if geo.point_segment_dist(
+                                pos, (sx, sy, sz), (ex, ey, ez)) <= br + radius:
+                            return True
                 continue
             lo, hi = ob.lo, ob.hi
             cx = geo.clamp(pos[0], lo[0], hi[0])
@@ -358,6 +410,15 @@ class Scene:
                 if not (gz + ob.trunk_h < z_lo or gz > z_hi):
                     if dxy <= ob.trunk_r + pad:
                         return True
+                if ob.branches:
+                    # 细枝：z 带重叠 + 2D 线段距离（真机场景；默认无枝不生效）
+                    for (sx, sy, sz, ex, ey, ez, br) in ob.branches:
+                        zmin, zmax = min(sz, ez), max(sz, ez)
+                        if zmax < z_lo or zmin > z_hi:
+                            continue
+                        if geo.point_segment_dist_2d(
+                                (x, y), (sx, sy), (ex, ey)) <= br + pad:
+                            return True
                 continue
             if ob.hi[2] < z_lo or ob.lo[2] > z_hi:
                 continue
@@ -383,6 +444,14 @@ class Scene:
                 if t is not None and 0 <= t <= max_t:
                     if best is None or t < best:
                         best = t
+                if ob.branches:
+                    # 细枝：有限圆柱，取最近（真机场景；默认无枝不生效）
+                    for (sx, sy, sz, ex, ey, ez, br) in ob.branches:
+                        t = geo.ray_finite_cylinder(
+                            origin, direction, (sx, sy, sz), (ex, ey, ez), br)
+                        if t is not None and 0 <= t <= max_t:
+                            if best is None or t < best:
+                                best = t
                 continue
             t = geo.ray_aabb(origin, direction, ob.lo, ob.hi)
             if t is not None and 0 <= t <= max_t:

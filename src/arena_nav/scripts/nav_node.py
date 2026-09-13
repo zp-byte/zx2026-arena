@@ -81,6 +81,63 @@ def vo_deflect(px, py, pz, vx, vy, drone_id, nj, nv,
     return (side * t1x, side * t1y, score, tcpa, dcpa, d)
 
 
+def bh_evidence_tier(occ_ev, rebuild_n, window_cycles, t_near, t_far,
+                     trust_r, dense_factor, nx, ny, g_to_world, est_pos):
+    """O1/O4 证据积分决策（纯函数，tools/bh_selftest.py 离线验证）。
+
+    真机树枝避障的判占核心：窗口内观测计数替代"一点即占"。
+    就地遗忘窗口外格（last_cycle < rebuild_n - window_cycles 删）；
+    判占 = cnt ≥ dense_factor×T（距 est 分档：trust_r 内近档，外远档）——
+    密度线以上=树干/密枝簇（刚性，封格）；细枝稀疏回波（1 ≤ cnt < 判占线）
+    全部进不确定档 unc：不封格，O4 跨格限速可生存接触。
+    20260912 分支矩阵定论（run_logs/matrix_branch_20260912_214135 + _iso）：
+    旧"T 线判占"把细枝 1.5s 两次回波升成 occ，枝格+膨胀闭合树间走廊 →
+    森林内部 A* 不可穿 → 北绕界外 OOB 退赛 + 西入口墙滑扫（B 臂 0/3 PASS；
+    逐机制切除 O3/O4/O5 均 retired=5 不解 → 根因在判占线本身）。移到密度线
+    后细枝停留 UNC 走 O4 减速——"细枝不判死只减速"的设计本意。
+    返回 (occ, unc) 两组 (ix,iy) 集合。
+    """
+    for c in [c for c, ev in occ_ev.items()
+              if rebuild_n - ev[1] > window_cycles]:
+        del occ_ev[c]
+    occ, unc = set(), set()
+    for (ix, iy), (cnt, _lc) in occ_ev.items():
+        if not (0 <= ix < nx and 0 <= iy < ny):
+            continue
+        gx, gy = g_to_world(ix, iy)
+        d_est = math.hypot(gx - est_pos[0], gy - est_pos[1])
+        t_thr = t_near if d_est < trust_r else t_far
+        if cnt >= t_thr * dense_factor:
+            occ.add((ix, iy))
+        elif cnt >= 1.0:
+            unc.add((ix, iy))
+    return occ, unc
+
+
+def bh_uncertain_t(px, py, ux, uy, gocc_unc, ray, step, corridor,
+                   g_to_cell, g_to_world):
+    """O4 不确定格走廊扫描（纯函数，tools/bh_selftest.py 离线验证）。
+
+    沿指令方向 (ux,uy) 逐格采样，返回最近在走廊内（垂轨 |lat| ≤ corridor、
+    沿轨 0 < t ≤ ray）的不确定格沿轨距离 t，无则 None。
+    """
+    for k in range(1, int(ray / step) + 1):
+        sx = px + ux * step * k
+        sy = py + uy * step * k
+        gi, gj = g_to_cell(sx, sy)
+        if not gocc_unc[gj, gi]:
+            continue
+        gx, gy = g_to_world(gi, gj)
+        tc = (gx - px) * ux + (gy - py) * uy
+        if tc <= 0.0 or tc > ray:
+            continue
+        lat = abs((gx - px) * uy - (gy - py) * ux)
+        if lat > corridor:
+            continue
+        return tc
+    return None
+
+
 class NavNode:
     def __init__(self):
         rospy.init_node("nav_node", anonymous=True)
@@ -251,6 +308,42 @@ class NavNode:
         self._vt_scale_min = float(vt.get("scale_min", 0.35))
         self._vt_vetoes = 0       # 触发计数（验证日志证据用）
 
+        # ---- 真机树枝避障（O1-O5，2026-09-12 定稿；默认全关=基线逐位不变） ----
+        # 病灶：球冠仅视觉+巡航带 [1.5,3.5]（枝带 0.8-2.6 大多盲区）、一点即占+
+        # 永久格（细枝稀疏回波=幻影/永挡）、反应门 |z-pz|≤0.35 滤枝、反应窗
+        # 0.5m < 制动 0.63m。机制见各段注释与 sim_settings 的 branch_handling
+        # 段。O1 证据占用（窗口计数判占+遗忘）；O2 高度带（map_z_band）；
+        # O3 反应层/否决层高度门+反应半径放宽（ca_*）；O4 不确定减速
+        # （_apply_uncertain_slow，弱证据格限速）；O5 低证据格风摆余量膨胀。
+        bh = cl.get("branch_handling", {})
+        self._bh_enabled = bool(bh.get("enabled", False))
+        mzb = bh.get("map_z_band", [1.5, 3.5])
+        self._bh_z_lo, self._bh_z_hi = float(mzb[0]), float(mzb[1])
+        ev_bh = bh.get("evidence", {}) or {}
+        self._bh_ev_window = float(ev_bh.get("window_s", 1.5))
+        self._bh_ev_t_near = float(ev_bh.get("thresh_near", 2))
+        self._bh_ev_t_far = float(ev_bh.get("thresh_far", 4))
+        self._bh_ev_trust_r = float(ev_bh.get("trust_r", 5.0))
+        unc_bh = bh.get("uncertain", {}) or {}
+        self._bh_unc_enabled = bool(unc_bh.get("enabled", True))
+        self._bh_unc_vmax = float(unc_bh.get("v_max", 0.6))
+        self._bh_unc_margin = float(unc_bh.get("margin", 0.3))
+        self._bh_unc_lat = float(unc_bh.get("lat_margin", 0.15))
+        self._bh_unc_ray = float(unc_bh.get("ray", 2.5))
+        self._bh_unc_hits = 0     # O4 触发计数（法证采样，验证日志证据用）
+        # 判占密度倍数（sway_dense_factor）：cnt ≥ 该值×T 才封格——细枝证据
+        # 停留不确定档走 O4（20260912 分支矩阵定论，见 bh_evidence_tier 注释）
+        self._bh_dense = float(bh.get("sway_dense_factor", 3.0))
+        self._bh_ca_h = float(bh.get("ca_height_extra", 0.3))
+        self._bh_ca_react = float(bh.get("ca_react_extra", 0.6))
+        # O3 反应层绝对下限：低于该高度的点云不进反应扫描（地面 0/路缘
+        # 0.32/平台面 0/桶沿——着陆/投放面）。无此门时 hband 放宽（dr+0.3
+        # ≈0.65）把地面点拉进扫描 → 返场末段下降被"向上推"抵消，悬停地板
+        # ≈hband（matrix_branch_20260912_231105：B 臂 6/6 投送但 landed_n=0，
+        # 全员冻在 z≈0.65-0.7 vs A 臂 -0.05 落地）。枝带下沿 0.8 在门之上
+        # 不受影响。
+        self._bh_ca_floor = float(bh.get("ca_z_floor", 0.5))
+
         # ---- 风前馈（顶风补偿，抵消共享风稳态漂移） ----
         # 风项 acc += (wind-vel)/tau 是速度耦合扰动，nav 指令减去共享风（mean+阵风）
         # 即"朝风指令"，悬停偏移从 w/1.2 降到 ~0.14w。仅 wind.enabled 时订阅
@@ -285,6 +378,10 @@ class NavNode:
             self._gocc_infl = None
             self._gpath = None        # 全局 A* 格路径 [(ix,iy),...]
             self._gpath_t = -1e9
+            # ---- 真机树枝避障（O1-O5）状态：默认全关时零占用零行为 ----
+            self._occ_ev = {}         # O1 证据格: (ix,iy) -> [cnt, last_cycle]
+            self._gocc_unc = None     # O4 不确定格（有观测但未达判占阈值的格）
+            self._rebuild_n = 0       # 栅格重建周期计数（证据窗口判龄用）
             self._grid_t = -1e9       # 栅格重建时刻（与路径选择时刻解耦，供 P1 粘滞）
             self._path_force = False  # 强制重选路径（新 goal / 碰撞 / 路径被切断）
             self.drift = np.zeros(3)
@@ -565,6 +662,24 @@ class NavNode:
         # 全局 SLAM：把巡航带内点投到持久占用格（世界系真值测量，累积建图）。
         # 树杆贯穿 [0,3.2]，巡航带 [1.5,3.5] 能稳定命中；地面(0)/围栏(≤1.3)/
         # 标识柱(≤1.15)/路缘(≤0.32) 都低于该带，不进入地图（与 god-mode 一致）。
+        if self._bh_enabled:
+            # O1/O2 真机树枝模式：高度带可配置（枝带 [1.45,2.0]+cruise 1.8，
+            # 与巡航层重合的细枝进图）；证据格窗口计数替代一点即占——
+            # 单点只计 +1，判占由重建侧按阈值+窗口遗忘完成（见
+            # _rebuild_global_grid_branch；风摆的枝摆走即忘）。
+            # 带下限 > 围栏顶 1.30（硬不变量，见 sim_settings map_z_band
+            # 注释）：围栏环进带=实心墙判占 → pads→场内 2D A* 只能绕环外
+            # → OOB 全灭（matrix_branch_20260912_223444 B 臂 0/3 根因）。
+            for (x, y, z) in pts:
+                if self._bh_z_lo <= z <= self._bh_z_hi:
+                    c = self._g_to_cell(x, y)
+                    ev = self._occ_ev.get(c)
+                    if ev is None:
+                        self._occ_ev[c] = [1.0, self._rebuild_n]
+                    else:
+                        ev[0] += 1.0
+                        ev[1] = self._rebuild_n
+            return
         t_now = rospy.get_time() if self._pc_enabled else 0.0
         for (x, y, z) in pts:
             if 1.5 <= z <= 3.5:
@@ -614,8 +729,12 @@ class NavNode:
         """从占用格集合重建全局栅格：标记 → 膨胀 → 清自机足迹。
 
         滑窗模式（P4）只收 ttl 窗内格子并顺手剪枝（界住字典规模）；
-        否则用持久集合（逐位原行为）。
+        否则用持久集合（逐位原行为）。真机树枝模式（O1-O5）走证据积分
+        重建（阈值判占+遗忘+不确定格+风摆膨胀），见分支方法。
         """
+        if self._bh_enabled:
+            self._rebuild_global_grid_branch()
+            return
         occ = np.zeros((self.g_ny, self.g_nx), dtype=bool)
         if self._pc_enabled:
             cut = rospy.get_time() - self._pc_ttl
@@ -653,6 +772,52 @@ class NavNode:
             col_occ = self._dilate_rect(col_occ, infl)
             occ = occ | col_occ
         self._gocc_infl = occ
+        self._publish_occ_grid()
+
+    def _rebuild_global_grid_branch(self):
+        """O1 证据积分占用重建（真机树枝模式）：窗口遗忘 → 密度线判占 → 膨胀。
+
+        判占 = 窗口内观测计数 ≥ dense_factor×T（近/远分档：trust_r 内按近档
+        T_near×dense，外远档 T_far×dense）。密度线以上=树干/密枝簇=刚性封格；
+        细枝稀疏回波（1 ≤ cnt < 判占线）写 _gocc_unc，供 O4 跨格限速（不膨胀
+        ——不判死只减速）。窗口外格遗忘（治"一点即占+永久格"：风摆的枝摆走
+        即消失，不残留幻影墙）。O5 风摆膨胀已随判占线重设计退役（其作用对象
+        "低证据占用格"在新结构里停留 UNC 不封格，无膨胀可言；20260912 分支
+        矩阵：O5 把细枝格膨胀 2 格是走廊闭合的加剧者，切除仅降抖动不解根因）。
+        足迹清除与碰撞标记与常规路径同语义（碰撞=事件真值，独立持久）。
+        决策核心=bh_evidence_tier 模块级纯函数（tools/bh_selftest.py 离线验证）。
+        """
+        win = max(1, int(round(self._bh_ev_window / 0.5)))  # 重建周期 0.5s
+        occ_s, unc_s = bh_evidence_tier(
+            self._occ_ev, self._rebuild_n, win,
+            self._bh_ev_t_near, self._bh_ev_t_far, self._bh_ev_trust_r,
+            self._bh_dense, self.g_nx, self.g_ny,
+            self._g_to_world, self.est_pos)
+        occ = np.zeros((self.g_ny, self.g_nx), dtype=bool)
+        unc = np.zeros((self.g_ny, self.g_nx), dtype=bool)
+        for (ix, iy) in occ_s:
+            occ[iy, ix] = True
+        for (ix, iy) in unc_s:
+            unc[iy, ix] = True
+        infl = int(math.ceil(self.inflation / self.res))
+        occ = self._dilate_rect(occ, infl)
+        # 清空自机足迹（自机所在格必可通行；不确定格同清，防自格触发 O4）
+        ci, cj = self._g_to_cell(self.est_pos[0], self.est_pos[1])
+        for iy in range(max(0, cj - 1), min(self.g_ny, cj + 2)):
+            for ix in range(max(0, ci - 1), min(self.g_nx, ci + 2)):
+                occ[iy, ix] = False
+                unc[iy, ix] = False
+        # 碰撞标记：撞树后强制占用，绕过足迹清除，避免 lidar 盲区循环碰撞
+        if self._collision_obs:
+            col_occ = np.zeros((self.g_ny, self.g_nx), dtype=bool)
+            for (cix, ciy) in self._collision_obs:
+                if 0 <= cix < self.g_nx and 0 <= ciy < self.g_ny:
+                    col_occ[ciy, cix] = True
+            col_occ = self._dilate_rect(col_occ, infl)
+            occ = occ | col_occ
+        self._gocc_infl = occ
+        self._gocc_unc = unc
+        self._rebuild_n += 1
         self._publish_occ_grid()
 
     def _publish_occ_grid(self):
@@ -1585,10 +1750,26 @@ class NavNode:
             fx = px + cmd[0] * 0.3
             fy = py + cmd[1] * 0.3
             fz = pz + cmd[2] * 0.3
-        react_r = dr + 0.15
+        # O3 逃逸豁免（bh 开时）：包围枝云下 sign_fix 反应层存在 cmd≈0 自洽
+        # 不动点——点循环内 cmd 边推边变，前向点推后、后向点又见 v_in>0 推
+        # 回前，包围云下逐点对消收敛到 0（matrix_branch_20260912_231105 B44
+        # drone0 冻 60s+ 签名：de 逃逸已激活、dir 反复评分仍原地，est 只剩
+        # ±0.1 抖动）。A 臂 react_r=0.4 点稀疏不闭合；B 臂 react_r=1.34 +
+        # hband 0.65 枝云密集闭合，0.8 逃逸基速每拍被吞。逃逸方向已由
+        # _de_pick_dir 点云走廊门把关（近点方向禁选），否决层刹车包络（带
+        # scale 地板）与 vcap 照常兜底 → 逃逸期间跳过云推。默认关/A 臂零侵入。
+        if self._bh_enabled and self._de_active:
+            return cmd
+        # O3 真机树枝：高度门放宽 ±ca_height_extra（枝带 0.8-2.6 常被旧门
+        # |z-pz|≤0.35 滤掉）、反应半径 +ca_react_extra（旧反应窗 0.5m <
+        # 制动 0.63m，高速挂枝根因量）。默认关时逐位原行为。
+        react_r = dr + 0.15 + (self._bh_ca_react if self._bh_enabled else 0.0)
         pred_r = dr + 0.05
+        hband = dr + (self._bh_ca_h if self._bh_enabled else 0.0)
+        # O3 反应层地面下限（bh 开时）：着陆/投放面以下不推（见配置读处注释）
+        z_floor = self._bh_ca_floor if self._bh_enabled else -1e9
         for (x, y, z) in self.cloud:
-            if z < pz - dr or z > pz + dr:
+            if z < pz - hband or z > pz + hband or z < z_floor:
                 continue
             ex = px - x
             ey = py - y
@@ -1648,8 +1829,12 @@ class NavNode:
         v_est = getattr(self, '_v_est', None)
         v_now = math.hypot(v_est[0], v_est[1]) if v_est is not None else 0.0
         t_near = None
+        # O3 真机树枝：高度门放宽 ±ca_height_extra（与云避障同款；默认关原行为）
+        # + 地面下限 ca_z_floor（与云避障同款：着陆面以下不进刹车走廊）
+        hband = dr + (self._bh_ca_h if self._bh_enabled else 0.0)
+        z_floor = self._bh_ca_floor if self._bh_enabled else -1e9
         for (x, y, z) in self.cloud:
-            if z < pz - dr or z > pz + dr:
+            if z < pz - hband or z > pz + hband or z < z_floor:
                 continue
             dx = x - px
             dy = y - py
@@ -1675,6 +1860,42 @@ class NavNode:
             rospy.loginfo("nav_node: drone %d VETO scale=%.2f v_cmd=%.2f "
                           "v_allow=%.2f t_near=%.2f v_now=%.2f",
                           self.drone_id, s, vh, v_allow, t_near, v_now)
+        cmd[0] *= s
+        cmd[1] *= s
+        return cmd
+
+    # ---- O4 不确定减速（真机树枝避障：细枝稀疏回波的弱证据格） --------------
+    # 细枝 2cm @5m 的 lidar 单帧命中率 ~2-4%（branch_selftest 实测 2.2%），
+    # 稀疏回波常凑不满判占阈值——不判死也不盲穿：沿指令走廊扫 _gocc_unc
+    # （有观测但 cnt < T 的格），遇格把水平指令限速到 v_max（≈de 逃逸基速
+    # 0.6 量级，可生存接触）。只缩模不改向、不反馈进规划；veto 无关独立
+    # 生效（A/B 可单开）。在 _apply_veto 之后调用：对已缩放指令再缩放，
+    # 双地板自然取当前速度（veto 已刹到 ≤0.63 时本层近乎零侵入）。
+    def _apply_uncertain_slow(self, cmd):
+        if not (self._bh_enabled and self._bh_unc_enabled):
+            return cmd
+        if self._gocc_unc is None:
+            return cmd
+        vh = math.hypot(cmd[0], cmd[1])
+        if vh < 0.05:
+            return cmd
+        ux, uy = cmd[0] / vh, cmd[1] / vh
+        px, py, _ = self.odom[0], self.odom[1], self.odom[2]
+        dr = self.scene.drone_radius
+        corridor = dr + self._bh_unc_lat
+        step = self.res * 0.5
+        # 扫描核心=bh_uncertain_t 模块级纯函数（tools/bh_selftest.py 离线验证）
+        t_unc = bh_uncertain_t(px, py, ux, uy, self._gocc_unc,
+                               self._bh_unc_ray, step, corridor,
+                               self._g_to_cell, self._g_to_world)
+        if t_unc is None:
+            return cmd
+        s = min(1.0, max(self._vt_scale_min, self._bh_unc_vmax / vh))
+        self._bh_unc_hits += 1
+        if (self._bh_unc_hits % 100) == 1:
+            rospy.loginfo("nav_node: drone %d UNC-SLOW v_cmd=%.2f v_max=%.2f "
+                          "t_unc=%.2f", self.drone_id, vh,
+                          self._bh_unc_vmax, t_unc)
         cmd[0] *= s
         cmd[1] *= s
         return cmd
@@ -1867,6 +2088,8 @@ class NavNode:
 
         # P2 指令否决层：门最终发布指令（合成完毕、含风补偿），见 _apply_veto
         cmd = self._apply_veto(cmd)
+        # O4 不确定减速：弱证据格跨格限速（真机树枝；默认关零侵入），见方法
+        cmd = self._apply_uncertain_slow(cmd)
 
         # 停滞看门狗（纯观测）：未到 goal 而持续近零速 → 1Hz 诊断日志。
         # 各形态死锁（flap 停滞/贴靠平衡/磨树）从此日志自证，不再靠trace反推。

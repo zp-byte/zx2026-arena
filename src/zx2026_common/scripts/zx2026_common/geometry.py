@@ -130,3 +130,60 @@ def normalize(v):
     if n < 1e-12:
         return (0.0, 0.0, 0.0)
     return scale(v, 1.0 / n)
+
+
+def point_segment_dist(p, a, b):
+    """点 p 到 3D 线段 a->b 的最短距离。"""
+    ab = sub(b, a)
+    l2 = norm2(ab)
+    if l2 < 1e-12:
+        return dist(p, a)
+    t = clamp(dot(sub(p, a), ab) / l2, 0.0, 1.0)
+    return dist(p, add(a, scale(ab, t)))
+
+
+def point_segment_dist_2d(p, a, b):
+    """点 p=(x,y) 到 2D 线段 a->b 的最短距离。"""
+    abx = b[0] - a[0]
+    aby = b[1] - a[1]
+    l2 = abx * abx + aby * aby
+    if l2 < 1e-12:
+        return math.hypot(p[0] - a[0], p[1] - a[1])
+    t = clamp(((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / l2, 0.0, 1.0)
+    qx = a[0] + abx * t
+    qy = a[1] + aby * t
+    return math.hypot(p[0] - qx, p[1] - qy)
+
+
+def ray_finite_cylinder(origin, direction, a, b, r):
+    """射线与「有限圆柱」（中心线 a->b，半径 r）求交，返回最近 t（>=0）或 None。
+
+    细枝/树枝建模用（中心线为任意方向线段）。端盖忽略（误差 ≤ r，细枝
+    场景可接受）。direction 需归一化。
+    """
+    ab = sub(b, a)
+    l2 = norm2(ab)
+    if l2 < 1e-12:
+        return None
+    u = scale(ab, 1.0 / math.sqrt(l2))
+    w = sub(origin, a)
+    e = sub(w, scale(u, dot(w, u)))        # 相对轴线的垂向分量
+    f = sub(direction, scale(u, dot(direction, u)))
+    a2 = norm2(f)
+    if a2 < 1e-12:
+        return None                        # 射线平行轴线，只可能穿端盖（忽略）
+    b2 = 2.0 * dot(e, f)
+    c = norm2(e) - r * r
+    disc = b2 * b2 - 4.0 * a2 * c
+    if disc < 0:
+        return None
+    sq = math.sqrt(disc)
+    best = None
+    for t in ((-b2 - sq) / (2.0 * a2), (-b2 + sq) / (2.0 * a2)):
+        if t < 0:
+            continue
+        s = dot(sub(add(origin, scale(direction, t)), a), u)
+        if 0.0 <= s <= math.sqrt(l2) + 1e-9:
+            if best is None or t < best:
+                best = t
+    return best
