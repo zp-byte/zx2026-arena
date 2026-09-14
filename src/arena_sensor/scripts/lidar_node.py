@@ -46,6 +46,12 @@ class LidarNode:
         self.dropout_rate = float(sl.get("dropout_rate", 0.05))
         self.angular_noise_rad = math.radians(float(sl.get("angular_noise_deg", 0.5)))
         self.false_positive_rate = float(sl.get("false_positive_rate", 0.0))
+        # 花式扫描模拟（默认关）：每帧给俯仰环组加随机平移，模拟真机 Mid-360 非重复
+        # 扫描的时间积分——固定环把垂直覆盖离散成 0.10 rad 空隙，细梢（角尺寸<环隙）
+        # 落空隙里恒盲；每帧平移后多帧积分覆盖连续化，恒盲梢变闪烁可见（激活 Wave B
+        # 云记忆/孤立地板）。零额外射线成本（504 条不变）。
+        self.lissajous = bool(sl.get("lissajous", False))
+        self.lissajous_amp = 0.09   # 平移幅度 (rad)，≥ 环隙 0.10 之半，多帧积分覆盖连续
         self.rng = random.Random(self.seed + self.drone_id * 7919)
 
         self.odom_pos = (0.0, 0.0, 1.0)
@@ -71,15 +77,19 @@ class LidarNode:
     def _publish(self):
         pts = []
         origin = self.odom_pos
+        # 花式扫描：每帧一个全局俯仰平移（时间积分离散→连续的关键）。OFF 时恒 0，
+        # 不消耗 rng、射线逐位与旧行为一致（与历史基线可比）。
+        el_off = self.rng.uniform(-self.lissajous_amp, self.lissajous_amp) \
+            if self.lissajous else 0.0
         for az_i in range(self.az_steps):
             az = self.odom_yaw + az_i * (2.0 * math.pi / self.az_steps)
             for el in self.el_vals:
                 # 角度噪声：射线方向微偏（物理正确的噪声注入点）
                 if self.angular_noise_rad > 0:
                     az_noisy = az + self.rng.gauss(0.0, self.angular_noise_rad)
-                    el_noisy = el + self.rng.gauss(0.0, self.angular_noise_rad)
+                    el_noisy = el + el_off + self.rng.gauss(0.0, self.angular_noise_rad)
                 else:
-                    az_noisy, el_noisy = az, el
+                    az_noisy, el_noisy = az, el + el_off
                 dx = math.cos(el_noisy) * math.cos(az_noisy)
                 dy = math.cos(el_noisy) * math.sin(az_noisy)
                 dz = math.sin(el_noisy)

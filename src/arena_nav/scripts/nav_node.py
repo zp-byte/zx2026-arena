@@ -343,6 +343,19 @@ class NavNode:
         # 全员冻在 z≈0.65-0.7 vs A 臂 -0.05 落地）。枝带下沿 0.8 在门之上
         # 不受影响。
         self._bh_ca_floor = float(bh.get("ca_z_floor", 0.5))
+        # ---- Wave B ①-③（默认全关；单旗 A/B 过线才翻默认，见 sim_settings
+        # branch_handling 段注释与各机制设计说明） ----
+        # ① 接触域标记：碰撞时标记 est_pos 周围 contact_radius 盘胞（硬占用、
+        # 不膨胀、ttl 遗忘），重建时插在足迹清除之前（防自封+杀同梢复碰）。
+        cm_bh = bh.get("contact_mark", False)
+        self._bh_contact = bool(cm_bh)
+        self._bh_contact_r = float(bh.get("contact_radius", 0.65))
+        self._bh_contact_ttl = max(1.0, float(bh.get("contact_ttl_s", 12.0)))
+        # ② 云缓存梢记忆：self.cloud 保留最近 N 帧（梢点偶发帧可见的盲帧补位）。
+        self._bh_cloud_mem = int(bh.get("cloud_mem_frames", 0))
+        # ③ 孤立点斥力地板：>0 时 sign_fix 分支孤立点（1m 内 ≤3 点）push 抬到
+        # ≥ 该值（2.0 > cruise 1.8，至少抵消进近；切向/包络边缘点不再漏推）。
+        self._ca_iso_floor = float(bh.get("ca_iso_floor", 0.0))
 
         # ---- 风前馈（顶风补偿，抵消共享风稳态漂移） ----
         # 风项 acc += (wind-vel)/tau 是速度耦合扰动，nav 指令减去共享风（mean+阵风）
@@ -381,6 +394,10 @@ class NavNode:
             # ---- 真机树枝避障（O1-O5）状态：默认全关时零占用零行为 ----
             self._occ_ev = {}         # O1 证据格: (ix,iy) -> [cnt, last_cycle]
             self._gocc_unc = None     # O4 不确定格（有观测但未达判占阈值的格）
+            # Wave B ① 接触域标记: (ix,iy) -> 标记时重建周期（ttl 到期遗忘）。
+            # 与 _collision_obs（只标机体单胞、永久）互补：接触域盖住碰撞点
+            # 所在梢胞（~drone_radius 0.35m 在相邻胞——旧标记梢胞从未被标）。
+            self._contact_obs = {}
             self._rebuild_n = 0       # 栅格重建周期计数（证据窗口判龄用）
             self._grid_t = -1e9       # 栅格重建时刻（与路径选择时刻解耦，供 P1 粘滞）
             self._path_force = False  # 强制重选路径（新 goal / 碰撞 / 路径被切断）
@@ -396,6 +413,7 @@ class NavNode:
 
         self.odom = (0.0, 0.0, 1.0)
         self.cloud = []      # 最近一帧点云 [(x,y,z),...]（闭环避障 + 群集缩放用）
+        self._cloud_hist = []   # Wave B ② 梢记忆：最近 N 帧（cloud_mem_frames>1）
         self.path = []          # [(x,y,z),...]（仅 god-mode 使用）
         self.waypoint_idx = 0
         self.goal = None
@@ -606,7 +624,22 @@ class NavNode:
         if not self.closed_loop:
             return
         cx, cy = self._g_to_cell(self.est_pos[0], self.est_pos[1])
-        self._collision_obs.add((cx, cy))
+        # Wave B ① 接触域标记：旧标记只盖机体所在单胞——碰撞点 ~drone_radius
+        # 0.35m 在相邻胞（梢胞从未被标=同梢复碰根因）。接触域=est_pos 周围
+        # contact_radius 盘（drone_radius 0.35+drift 0.3 预算，漂移任意方向
+        # 都盖住梢胞）。硬占用、不膨胀（O5 铁律）、ttl 遗忘；重建时插在足迹
+        # 清除之前（结构性防自封），见 _rebuild_global_grid_branch。
+        if self._bh_contact:
+            r = self._bh_contact_r
+            k = int(math.ceil(r / self.res))
+            x0, y0 = self.est_pos[0], self.est_pos[1]
+            for di in range(-k, k + 1):
+                for dj in range(-k, k + 1):
+                    if (di * self.res) ** 2 + (dj * self.res) ** 2 <= r * r + 1e-9:
+                        self._contact_obs[self._g_to_cell(
+                            x0 + di * self.res, y0 + dj * self.res)] = self._rebuild_n
+        else:
+            self._collision_obs.add((cx, cy))
         self._rebuild_global_grid()
         if self.tc_enabled:
             # 粘滞模式下路径不随栅格周期重选：碰撞后必须立即强制绕开
@@ -658,7 +691,18 @@ class NavNode:
             y = struct.unpack_from('<f', data, b + oy)[0]
             z = struct.unpack_from('<f', data, b + oz)[0]
             pts.append((x, y, z))
-        self.cloud = pts
+        # Wave B ② 梢记忆：bh 开且 cloud_mem_frames>1 时保留最近 N 帧（梢点
+        # 偶发帧可见，进近末段 ~1/3 帧全盲——盲帧直接丢梢=反应层闪烁漏推）。
+        # 世界系真值点不随自机移动，过期只多留 0.2-0.3s；所有消费者（反应层/
+        # 否决层/sep_obs_guard）只作用"正在接近"的点（v_in/v_app/into>0 门），
+        # 身后过期点零推。建图走本帧 pts（下方循环），不受记忆影响。
+        if self._bh_cloud_mem > 1:
+            self._cloud_hist.append(pts)
+            while len(self._cloud_hist) > self._bh_cloud_mem:
+                self._cloud_hist.pop(0)
+            self.cloud = [p for fr in self._cloud_hist for p in fr]
+        else:
+            self.cloud = pts
         # 全局 SLAM：把巡航带内点投到持久占用格（世界系真值测量，累积建图）。
         # 树杆贯穿 [0,3.2]，巡航带 [1.5,3.5] 能稳定命中；地面(0)/围栏(≤1.3)/
         # 标识柱(≤1.15)/路缘(≤0.32) 都低于该带，不进入地图（与 god-mode 一致）。
@@ -801,6 +845,17 @@ class NavNode:
             unc[iy, ix] = True
         infl = int(math.ceil(self.inflation / self.res))
         occ = self._dilate_rect(occ, infl)
+        # Wave B ① 接触域标记：插在足迹清除**之前**——自机脚下/近旁的标记
+        # 被本拍足迹重开（结构性防自封：恢复路径起点永不被自己的标记封死），
+        # 远端标记保留 → A* 绕开梢点（杀同梢复碰）。硬占用、不膨胀（O5 铁律：
+        # 接触标记只挡原点，膨胀=封廊道）。ttl 到期遗忘（重建周期 0.5s）。
+        if self._bh_contact and self._contact_obs:
+            cut = self._rebuild_n - max(1, int(round(self._bh_contact_ttl / 0.5)))
+            for c in [c for c, tn in self._contact_obs.items() if tn < cut]:
+                del self._contact_obs[c]
+            for (cix, ciy) in self._contact_obs:
+                if 0 <= cix < self.g_nx and 0 <= ciy < self.g_ny:
+                    occ[ciy, cix] = True
         # 清空自机足迹（自机所在格必可通行；不确定格同清，防自格触发 O4）
         ci, cj = self._g_to_cell(self.est_pos[0], self.est_pos[1])
         for iy in range(max(0, cj - 1), min(self.g_ny, cj + 2)):
@@ -1792,6 +1847,17 @@ class NavNode:
                     danger = min(ed, dd)
                     push = v_in + max(0.0, react_r - danger) * 4.0 \
                            + max(0.0, pred_r - dd) * 6.0
+                    # Wave B ③ 孤立点斥力地板：切向擦过 (v_in≈0) 或包络边缘
+                    # (danger≈react_r) 的孤立梢点 push 只有 0.1-1.2 < 巡航 1.8
+                    # 进近——看得到梢仍被推进去（10-15% 余量带）。1m 内 ≤3 点
+                    # =孤立梢点（密枝簇 >3 点不受扰；与 cloud_mem_frames≤3
+                    # 自洽：梢点 3 帧回声计 3 仍判孤立）。地板 2.0 > cruise 1.8
+                    # 至少抵消进近。
+                    if self._ca_iso_floor > 0.0 and \
+                            sum(1 for (qx, qy, qz) in self.cloud
+                                if (qx - x) ** 2 + (qy - y) ** 2
+                                + (qz - z) ** 2 <= 1.0) <= 3:
+                        push = max(push, self._ca_iso_floor)
                     cmd[0] += push * ux
                     cmd[1] += push * uy
                     cmd[2] += push * uz
