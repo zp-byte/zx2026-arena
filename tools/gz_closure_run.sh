@@ -42,6 +42,9 @@ trap 'restore_seed; cleanup' EXIT
 
 for S in $SEEDS; do
   echo "===== gz closure seed=$S ====="
+  # 0a) 自愈 exec bit（124209 教训）：UNC 编辑 node 脚本会掉可执行位，
+  # roslaunch spawn 静默失败只进 roslaunch-*.log。发车前强制复原。
+  find $WS/src -name "*.py" -path "*/scripts/*" -exec chmod +x {} \;
   # 0) 清场点名：零 ROS/GZ 进程才发车（防串局污染）
   N=1
   for i in $(seq 1 30); do
@@ -72,6 +75,35 @@ for S in $SEEDS; do
     continue
   fi
   echo "P2_WAIT at +${i}s"
+  # 活体检查（124209 教训）：UNC 编辑掉 exec bit → scorekeeper 未被 spawn，
+  # 三局 score yaml/rosout 全空，roslaunch 报错只进 roslaunch-*.log 不进终端。
+  # 判据=scorekeeper 的 publisher 话题在列（init 即注册 /zx2026/score/<i>）。
+  # 不能等消息：latched 话题在首次 LANDED/释放 publish 前无内容，echo 必空转
+  # （bkbtraaps 三局 FATAL 误报教训）。
+  SKALIVE=""
+  for i in $(seq 1 10); do
+    rostopic list 2>/dev/null | grep -q "^/zx2026/score/0$" && SKALIVE=1 && break
+    sleep 1
+  done
+  if [ -z "$SKALIVE" ]; then
+    echo "FATAL: scorekeeper not alive (score/0 topic absent) — abort seed $S"
+    cp /tmp/zx2026_gz_e2e.log "$OUT/seed${S}_gz.log" 2>/dev/null
+    cleanup
+    continue
+  fi
+  # start 前等 /zx2026/start 服务在列（bkmfoi31i 教训：P2_WAIT 状态早于服务
+  # 注册完，早调 rosservice call 会挂死——服务不存在时 rosservice 等待无超时）
+  SVCOK=""
+  for i in $(seq 1 30); do
+    rosservice list 2>/dev/null | grep -q "^/zx2026/start$" && SVCOK=1 && break
+    sleep 1
+  done
+  if [ -z "$SVCOK" ]; then
+    echo "FATAL: /zx2026/start service never registered — abort seed $S"
+    cp /tmp/zx2026_gz_e2e.log "$OUT/seed${S}_gz.log" 2>/dev/null
+    cleanup
+    continue
+  fi
   rosservice call /zx2026/start
   # 3) 观察循环：done=6/6 或 state=DONE 才停；否则 600s wall 上限
   T0=$(date +%s)

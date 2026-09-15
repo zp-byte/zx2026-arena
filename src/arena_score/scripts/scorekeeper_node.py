@@ -70,6 +70,12 @@ class ScorekeeperNode:
         self.path_stats = {}
         self._reported = False
         self._started = False   # odom 回调可能先于 P4_EXECUTE 到（竞态 AttributeError）
+        # 封卷汇合窗（gz 官宣 5/6 法证）：last phase DONE 触发 all-done 写报告时，
+        # 该机 LANDED task_update 可能仍滞留在另一 TCP 连接上（executor 同 tick
+        # 先发 LANDED 后发 phase DONE，跨连接顺序无保证）→ 报告漏计 1 架（s2 阶梯
+        # 5/6=-10 分）。报告延迟 REPORT_SETTLE_S 再写，让 LANDED 事件流落袋。
+        self._settle = float(self.score_cfg.get("report_settle_s", 1.0))
+        self._report_timer = None
 
         self.pub = {}
         self.pub_summary = rospy.Publisher("/zx2026/score_summary", String, queue_size=1, latch=True)
@@ -202,9 +208,9 @@ class ScorekeeperNode:
         elif msg.data == "DONE" and not self._reported:
             # 时限封卷（run8 法证）：时限截断下未完成机永远到不了终态，
             # "全队 mission_done" 触发等不到——state DONE 即比赛定格口径，
-            # 此刻封卷写报告（幂等，与全队终态触发共用 _reported 锁）
-            self._reported = True
-            self._write_report()
+            # 此刻封卷写报告（幂等，与全队终态触发共用 _reported 锁）。
+            # 经 _settle 汇合窗延迟，避免 LANDED 事件滞留被漏计。
+            self._schedule_report()
 
     # ---------------------------------------------------------------- retired (P5)
     def mark_retired(self, i, reason=""):
@@ -278,8 +284,23 @@ class ScorekeeperNode:
 
         if all(self.mission_done.values()) and self.mission_done:
             if not self._reported:
-                self._reported = True
-                self._write_report()
+                self._schedule_report()
+
+    def _schedule_report(self):
+        """封卷汇合窗：延迟 _settle 秒再写报告（单次，_reported 幂等锁）。
+
+        all-done / state DONE 双触发路径都走这里；Timer 回调在 spin 主线程外
+        执行，延迟窗口内 spin 继续消费滞留的 LANDED task_update，封卷快照
+        因此包含完整事件流（gz 官宣 5/6 竞态修复）。
+        """
+        if self._reported:
+            return
+        self._reported = True
+        if self._report_timer is not None:
+            self._report_timer.shutdown()
+        self._report_timer = rospy.Timer(
+            rospy.Duration(self._settle), lambda _e: self._write_report(),
+            oneshot=True)
 
     def _write_report(self):
         try:
