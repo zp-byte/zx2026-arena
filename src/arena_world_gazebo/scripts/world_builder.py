@@ -7,6 +7,7 @@
 输出: arena_world_gazebo/worlds/forest_world.world
 用法: python3 world_builder.py
 """
+import math
 import os
 import sys
 
@@ -51,8 +52,45 @@ def vis_pose(name, geom, color, x, y, z, yaw=0.0):
             % (name, x, y, z, yaw, geom, mat(*color)))
 
 
+def branch_links(ob):
+    """树枝碰撞体（gz 树枝物理缺环补齐）：消费 Scene ob.branches（世界系
+    线段+半径），逐位生成 SDF cylinder 碰撞+视觉。
+
+    设计律与 python 后端一致：枝参与硬碰撞（物理+事件），球冠仍仅视觉。
+    branches.enabled=false 时 Scene 不生枝（ob.branches=None）→ 本函数零输出，
+    A/B 单旗天然成立（无需额外开关）。
+
+    几何注意：Gazebo Classic 11（sdformat 1.7）无 capsule 几何（sdformat
+    1.8+ 才有），用无帽 cylinder 近似——恰与 monitor 的 point_segment_dist
+    线段判定同几何，端帽差 ≤ 枝径 2.2cm 可忽略。SDF cylinder 沿自身 Z 轴；
+    姿态取 roll=0 / pitch=acos(dz) / yaw=atan2(dy,dx)（同胶囊朝向约定）。
+    """
+    links = []
+    brs = getattr(ob, "branches", None) or []
+    # model pose=(cx,cy,h/2)：世界坐标→model 系
+    ox, oy, oz = ob.cx, ob.cy, ob.trunk_h / 2.0
+    for k, (sx, sy, sz, ex, ey, ez, br) in enumerate(brs):
+        dx, dy, dz = ex - sx, ey - sy, ez - sz
+        ln = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if ln < 1e-9:
+            continue
+        ux, uy, uz = dx / ln, dy / ln, dz / ln
+        pitch = math.acos(max(-1.0, min(1.0, uz)))
+        yaw = math.atan2(uy, ux)
+        mx, my, mz = (sx + ex) / 2.0 - ox, (sy + ey) / 2.0 - oy, (sz + ez) / 2.0 - oz
+        cyl = '<cylinder><radius>%.3f</radius><length>%.3f</length></cylinder>' % (br, ln)
+        links.append("""  <link name="branch_%d">
+    <pose>%.3f %.3f %.3f 0 %.4f %.4f</pose>
+    %s
+    %s
+  </link>""" % (k, mx, my, mz, pitch, yaw,
+               col_geo(cyl), vis_geo(cyl, mat(0.45, 0.32, 0.18))))
+    return links
+
+
 def tree_model(oid, ob):
-    """圆柱树干（碰撞+视觉）+ 蓬松球形树冠（仅视觉）；几何取 ob 的 trunk/crown 字段。"""
+    """圆柱树干（碰撞+视觉）+ 蓬松球形树冠（仅视觉）+ 树枝圆柱（碰撞+视觉，
+    若 Scene 生枝）；几何取 ob 的 trunk/crown/branches 字段。"""
     cx = ob.cx
     cy = ob.cy
     r = ob.trunk_r
@@ -88,9 +126,10 @@ def tree_model(oid, ob):
     %s
   </link>
 %s
+%s
 </model>""" % (oid, cx, cy, h / 2.0,
               col_geo(cyl), vis_geo(cyl, mat(0.45, 0.32, 0.18)),
-              "\n".join(crown_links))
+              "\n".join(crown_links), "\n".join(branch_links(ob)))
 
 
 def bush_model(oid, lo, hi):

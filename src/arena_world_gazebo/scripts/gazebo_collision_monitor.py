@@ -23,6 +23,7 @@ from geometry_msgs.msg import Twist
 from gazebo_msgs.msg import ModelStates
 
 from zx2026_common import config as cfg
+from zx2026_common import geometry as geo
 from zx2026_common.scene import Scene
 
 
@@ -80,6 +81,37 @@ class CollisionMonitor:
             return False
         return (px - t.cx) ** 2 + (py - t.cy) ** 2 < (t.trunk_r + self.dr) ** 2
 
+    def _branch_hit(self, px, py, pz, t):
+        """球-枝胶囊检测（gz 树枝物理缺环补齐）：球(pos,dr) vs 线段圆柱
+        (A→B, br)。命中返回弹开方向（枝最近点→无人机，**水平化**——见下），
+        未命中返回 None。与 python 后端 scene.collides 的枝子句同几何。"""
+        brs = getattr(t, "branches", None)
+        if not brs:
+            return None
+        p = (px, py, pz)
+        for (sx, sy, sz, ex, ey, ez, br) in brs:
+            a, b = (sx, sy, sz), (ex, ey, ez)
+            if geo.point_segment_dist(p, a, b) > br + self.dr:
+                continue
+            ab = geo.sub(b, a)
+            l2 = geo.norm2(ab)
+            tt = 0.0 if l2 < 1e-12 else geo.clamp(
+                geo.dot(geo.sub(p, a), ab) / l2, 0.0, 1.0)
+            q = geo.add(a, geo.scale(ab, tt))   # 枝上最近点
+            d = geo.sub(p, q)
+            n = geo.norm(d)
+            if n < 1e-9:
+                return (0.0, 0.0, 1.0)          # 退化：骑轴心，向上弹
+            # 枝弹方向水平化（树干弹 (dx,dy,0) 同律）：枝近水平（el -0.5~0.3），
+            # 机在枝下时"最近点→机"方向朝下——gz 真物理下 bounce 2m/s 直坠，
+            # seed43 d0 顶枝 z=1.65 被砸坐地 (z=0.18) 判 UNAUTHORIZED_LANDING
+            # 退休。水平绕开才是枝恢复的正确语义；水平退化兜底向上。
+            h = math.hypot(d[0], d[1])
+            if h > 1e-6:
+                return (d[0] / h, d[1] / h, 0.0)
+            return (0.0, 0.0, 1.0)
+        return None
+
     def _collision(self, i, px, py, pz, dpos):
         """返回 (是否碰撞, 弹开方向 vx,vy,vz)。"""
         for t in self.trees:
@@ -89,6 +121,9 @@ class CollisionMonitor:
                 if n < 1e-9:
                     return True, (1.0, 0.0, 0.0)
                 return True, (dx / n, dy / n, 0.0)
+            bdir = self._branch_hit(px, py, pz, t)
+            if bdir is not None:
+                return True, bdir
         for b in self.bushes:
             if self._sphere_aabb(px, py, pz, self.dr, b.lo, b.hi):
                 nx = min(max(px, b.lo[0]), b.hi[0])

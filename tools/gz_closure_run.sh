@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/gz_closure_run.sh — Gazebo 实弹官宣收口 v2（2026-09-15）
+# tools/gz_closure_run.sh — Gazebo 实弹官宣收口 v3（2026-09-16 树枝物理版）
 #
 # v1 教训：gazebo_e2e.sh 的观察循环把 latched 的 /zx2026/score_summary 首次
 # 出现当任务终点（首架穿越即发布，landed=False）→ 三局均在 wall+74s、
@@ -7,12 +7,16 @@
 # 均未及落盘。v2 自带观察循环：只认 done=6/6 或 /zx2026/state=DONE，
 # 600s wall 上限（现行栈 sim 局 done≈170-190s，RTF≈1）。
 #
-# 口径（预登记）：Gazebo 后端无树枝物理——world_builder 只建树干圆柱
-# （碰撞）+树冠球（视觉），gazebo_collision_monitor 只查 trunk/bush/fence/
-# 机间。本官宣验证全栈（含 lissajous+云记忆，lidar_node 全栈继承）在物理
+# 口径（预登记，v3）：Gazebo 后端已补齐树枝物理——world_builder 生成枝
+# cylinder 碰撞+视觉（Gazebo Classic 11 / sdformat 1.7 无 capsule 几何，用
+# 无帽 cylinder 近似），gazebo_collision_monitor 增球-枝线段检测、弹向
+# 水平化（树干弹同律；初版"最近点→机"全 3D 弹在真物理下把顶枝机砸坐地
+# 判 UNAUTHORIZED_LANDING——seed43 d0 案例，水平化后同 seed 6/6 全 DONE）。
+# B 臂（branches.enabled=true）预期 col>0=残余避障失效被物理逮住，
+# done/score 不得劣化；A 臂（false）Scene 不生枝，零新旗。
+# 本官宣验证全栈（含 lissajous+云记忆，lidar_node 全栈继承）在物理
 # 后端的总体表现：col 计数（monitor logwarn "COLLISION #" 带坐标）、
-# score、全时长无右删失、NE 无断档。树枝避障本体已由 sim 24-cell 矩阵
-# 定谳（c283f46），不在 gz 重证。
+# score、全时长无右删失、NE 无断档。
 #
 # 用法: bash ~/zx2026_arena_ws/tools/gz_closure_run.sh
 WS=/home/ubuntu/zx2026_arena_ws
