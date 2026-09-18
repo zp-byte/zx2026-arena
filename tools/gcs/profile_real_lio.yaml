@@ -26,7 +26,8 @@ topics:
   drop_done: null             # TODO 真机投放确认适配器（FR-1.8）
   metrics: null               # 真机无 nav_metrics（FR-1.7 sim 专属）
   match_progress: null        # TODO 真机匹配进度适配器（FR-1.9）
-  grid_cloud: null            # TODO 现场定 LIO 累积点云 topic（FR-1.4 real 建图）
+  grid_cloud: null            # TODO 现场定 LIO 累积点云 topic（FR-1.4 real 建图）——
+                              #   cloud_adapter.py --src 同步此名（2026-09-18 落地）
 
 # GCS 操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
 # 脚本语义（sh_files 源码核实）: takeoff/land = /px4ctrl/takeoff_land cmd 1/2；

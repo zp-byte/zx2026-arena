@@ -88,6 +88,17 @@ mavros cmd_vel（会和 px4ctrl 抢模式）。`tools/gcs/vel_bridge.py`：
 - 飞行顺序：bench_check PASS → takeoff.sh（AUTO_HOVER）→ RC 扳 CMD_CTRL → 桥输出生效 → land.sh。
 - 自检：`python3 vel_bridge.py --selftest`（12 检，WSL 无 ROS 可跑）；机载运行须先 `source ~/Diff-planner/devel/setup.sh`（quadrotor_msgs）。
 
+### 3.2 cloud_adapter（真机点云→nav 输入适配，2026-09-18 落地）
+
+nav 的 `/drone_{id}/cloud` 契约 = xyz 世界系、10Hz、自机为心 5m、**无地面回波**（sim lidar 形态）。真云多出 sim 没有的形态，适配器（`tools/gcs/cloud_adapter.py`）四道滤：
+
+1. **地面滤（最要害）**：真云含地面回波，不滤=地面成幻影墙（W5"楔死"同族真机特供版）——滤 `(z − odom_z) < −0.6m`（锚 /Odometry，LIO 原点=起飞点重力对齐）
+2. 头顶滤：`(z − odom_z) > +2.5m` 剪树冠杂波
+3. 半径滤：距自机 >5m 丢（sim sensor_range 同款，密度/广度对齐）
+4. 体素降样 0.15m + 1200 点硬顶（nav 20Hz Python 逐点环 × mem6，爆量烧 CPU；密度语义保 ②孤立点阈值前提）
+
+odom 断 >0.5s 停发（无锚没法做相对滤——宁缺勿幻影）。源 topic `--src /cloud_registered`（faster_lio 默认名，现场定谳后同步 profile grid_cloud）。自检 `--selftest`（8 检）+ **WSL 本地 ROS 回环 E2E 已过**（地面/头顶/超半径全滤、同格合并质心、帧透传）。运行顺序与 vel_bridge 并列：`python3 cloud_adapter.py --id 0`（无 quadrotor_msgs 依赖，只须 ROS）。
+
 ---
 
 ## 4 铁律（实战法证换来的）
