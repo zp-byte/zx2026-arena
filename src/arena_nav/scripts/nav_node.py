@@ -1858,15 +1858,18 @@ class NavNode:
                            + max(0.0, pred_r - dd) * 6.0
                     # Wave B ③ 孤立点斥力地板：切向擦过 (v_in≈0) 或包络边缘
                     # (danger≈react_r) 的孤立梢点 push 只有 0.1-1.2 < 巡航 1.8
-                    # 进近——看得到梢仍被推进去（10-15% 余量带）。1m 内 ≤3 点
-                    # =孤立梢点（密枝簇 >3 点不受扰；与 cloud_mem_frames≤3
-                    # 自洽：梢点 3 帧回声计 3 仍判孤立）。地板 2.0 > cruise 1.8
-                    # 至少抵消进近。
-                    if self._ca_iso_floor > 0.0 and \
-                            sum(1 for (qx, qy, qz) in self.cloud
-                                if (qx - x) ** 2 + (qy - y) ** 2
-                                + (qz - z) ** 2 <= 1.0) <= 3:
-                        push = max(push, self._ca_iso_floor)
+                    # 进近——看得到梢仍被推进去（10-15% 余量带）。1m 内点数
+                    # ≤max(3, cloud_mem_frames)=孤立梢点（密枝簇单帧即 >3 点
+                    # 不受扰；阈值随记忆帧数缩放——梢点每帧 ≤1 回声，N 帧记忆
+                    # 计 ≤N 点仍判孤立；20260918 枝梢时窗 A/B 把记忆延到 6 帧，
+                    # 硬编码 3 会把 6 帧回声的梢点误判成密簇）。地板 2.0 >
+                    # cruise 1.8 至少抵消进近。
+                    if self._ca_iso_floor > 0.0:
+                        n_near = sum(1 for (qx, qy, qz) in self.cloud
+                                     if (qx - x) ** 2 + (qy - y) ** 2
+                                     + (qz - z) ** 2 <= 1.0)
+                        if n_near <= max(3, self._bh_cloud_mem):
+                            push = max(push, self._ca_iso_floor)
                     cmd[0] += push * ux
                     cmd[1] += push * uy
                     cmd[2] += push * uz
