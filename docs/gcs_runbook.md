@@ -70,11 +70,23 @@ python3 tools/gcs/gcs_ops.py --profile $P debug <名>   # 面板调试窗同款�
 | gcs_hub / panel / ops | 本机 | 本机（地面端），经链路聚合六机 |
 | 仿真栈 | stack_up.sh 的 SIM 段 | **不需要**（stack_up 只适用于 sim；real 手动分步起） |
 
-**真机联调前置三项 TODO（未清前 real 起不来）**：
+**真机联调前置三项 TODO（2026-09-18 已脚本化——地面跑脚本，现场只剩执行）**：
 
-1. **IP 网段**——agent→hub 上报地址与实际链路网段对齐（hub 默认收 9870 端口）；六机 IP 规划 + 机侧静态 IP / DHCP 静态绑定。
-2. **ssh 公钥**——面板 DEBUG 窗 / ops ssh 调试命令需 `nv@192.168.1.10x` 免密（公钥分发 + `ssh-copy-id`）。
-3. **no-prop bench**——`profile_real_lio.yaml` 里 real topic 实配核对（LIO `/Odometry`、twist 恒零时机体自动位置差分）+ 无螺旋桨台架过一遍 agent/hub 通路。
+1. **IP 网段**——agent→hub 上报地址与实际链路网段对齐（hub 默认收 9870 端口）；六机 IP 规划 + 机侧静态 IP / DHCP 静态绑定。→ `bash tools/gcs/provision_real.sh`（ping+免密+Diff-planner 在位三探针逐机验，`--server <ip>` 顺带回填 profile_*.yaml 的 server 字段；netplan/路由器绑定仍现场做）。
+2. **ssh 公钥**——面板 DEBUG 窗 / ops ssh 调试命令需 `nv@192.168.1.10x` 免密（公钥分发 + `ssh-copy-id`）。→ 同上脚本（无 key 自动生成 ed25519；copy-id 后 BatchMode 复验；**勿用 sshpass**）。
+3. **no-prop bench**——`profile_real_lio.yaml` 里 real topic 实配核对（LIO `/Odometry`、twist 恒零时机体自动位置差分）+ 无螺旋桨台架过一遍 agent/hub 通路。→ 机载 `bash tools/gcs/bench_check.sh --id 0`（话题/服务在列 + LIO ≥20Hz + mavros connected + vel_bridge 无桨链路回环）；agent/hub 通路 = 地面 `fake_agent_test.py` + `gcs_ops preflight`。
+
+### 3.1 vel_bridge（vel_cmd→px4ctrl 桥，2026-09-18 落地）
+
+真机控制栈是 Fast-Drone-250 架构（px4ctrl 持 FCU 所有权，mavros 只做
+battery/state），**注入点 = px4ctrl 的 `/position_cmd` 输入**，不走
+mavros cmd_vel（会和 px4ctrl 抢模式）。`tools/gcs/vel_bridge.py`：
+
+- 契约：订阅 `/drone_{id}/vel_cmd`（世界系速度+yaw 速率，20Hz，sim 插件同契约）+ `/Odometry`（faster_lio）→ 发布 `/position_cmd`（quadrotor_msgs/PositionCommand，50Hz）。position = odom 位置 + v×0.15s 前视点（无状态不积分，LIO 抖动零累积）；velocity/acc 直传，acc=0；kx/ky/kz=0 用 px4ctrl cfg 默认增益；速度限幅 2.0 m/s / yaw_dot 1.0。
+- 断链保护（对齐 sim 插件 0.5s 语义）：vel_cmd 静默 >0.5s → HOLD 定点悬停 2.0s → 停发（px4ctrl 自身 cmd 超时接管；其参数名现场核实）；LIO 断 >0.3s 立即停发。
+- **模式切换不由桥做**：CMD_CTRL 靠 RC 档位（人手）；起飞/降落走 sh_files（takeoff/land 服务），panic 同款——land 不经过桥，桥死机也能落地。
+- 飞行顺序：bench_check PASS → takeoff.sh（AUTO_HOVER）→ RC 扳 CMD_CTRL → 桥输出生效 → land.sh。
+- 自检：`python3 vel_bridge.py --selftest`（12 检，WSL 无 ROS 可跑）；机载运行须先 `source ~/Diff-planner/devel/setup.sh`（quadrotor_msgs）。
 
 ---
 

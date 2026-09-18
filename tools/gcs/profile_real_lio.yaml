@@ -38,10 +38,12 @@ topics:
 #   StrictHostKeyChecking=accept-new 首连不卡 known_hosts 确认
 #   (accept-new 需地面站 OpenSSH>=7.6; Ubuntu 20.04 自带 8.2 满足,
 #   老机器兜底=ssh-keyscan 预灌 known_hosts 后去掉该参数)。
-# TODO(联调日) 核实: 机 IP 网段 + ssh-copy-id 发公钥（勿用 sshpass）。
+# TODO①② 已脚本化（2026-09-18）: bash tools/gcs/provision_real.sh
+#   （ping+免密+Diff-planner 三探针逐机验，--server 回填本字段；勿用 sshpass）。
 #   目录大小写已按实机证据定 Diff-planner（小写 p, 手册写错大写 P）——
 #   联调日仍跑 DEBUG 窗 ws 探针（ls -d ~/Diff*）一次复核。
-#   panic=逐机 ssh land，交付前必须 no-prop bench 实弹验证。
+#   panic=逐机 ssh land，交付前必须 no-prop bench（tools/gcs/bench_check.sh）
+#   实弹验证，vel_bridge 注入点/安全语义见 gcs_runbook §3.1。
 ops:
   status_file: /home/ubuntu/zx2026_arena_ws/run_logs/gcs_status.json
   shell_prefix: ""
