@@ -75,3 +75,57 @@ tools/w2_phase_attr.py（executor 腿时间线 × nav 碰撞 epoch 落窗，双�
 - tools/w2_phase_attr.py（相位归因）、w2_corridor_geo.py（走廊几何）、w2_ne_check.py（NE/fence 定性）、w2_dbg_attr.py（日志格式调试）
 - /tmp/all_collisions.txt（全史 2458 行，collision_extract.sh 产物）
 - 日志双格式教训：主 .log=[rosout][INFO] wall，-stdout.log=[INFO] [epoch]；跨文件去重键 (drone,x,y,秒)
+
+## 定谳（2026-09-18，w2_matrix 4 臂 × seed{42,43,45} 12 cell 零超时）
+
+证据：run_logs/w2_matrix_20260918_100954（tools/w2_matrix_run.py 驱动 +
+w2_matrix_post.py 归因）。基线=当前默认栈（W1 三旗 ON，滚动基线纪律）。
+
+### 结果（col / score / done_t）
+
+| 臂 | s42 | s43 | s45 | Σcol | 最低分 | FAIL |
+|---|---|---|---|---|---|---|
+| A_base | 0/100/165 | 5/100/185 | 4/100/195 | 9 | 100 | 0 |
+| B_p2 | 0/100/160 | 4/100/190 | 0/100/155 | 4 | 100 | 0 |
+| C_p1 | 1/100/180 | 6/90/195(landed 5) | 2/100/180 | 9 | 90 | 0 |
+| D_p1p2 | 0/100/165 | 12/85/200(**retired[0]→FAIL**) | 6/90/200(landed 5) | 18 | 85 | 1 |
+
+### 归因（w2_matrix_post.py，碰撞→最近障碍）
+
+- **A 的 9 col 全在 MID/seam 树**（tree#25/#30/#32——立案 Top 热点），外圈
+  0 起：09-04 立案时的外圈碰撞形态本轮未复现（方差）。P1 的靶场景缺席。
+- **C 的 +Δ 全部集中在东喉口**：tree#34 (13.0,6.8) × tree#41 (12.7,10.0)
+  咽喉（x 11.7-14.3，y 7.4-11.3）8 起 + d4 外圈逃逸 (12.6,11.3)——via 8.5
+  拦不住 A* 到 pad 段的北绕。离线核查过 y=8.5 线净空 ≥0.8，但 A* 实际
+  绕行+六机 funnel+swarm 分离在喉口相互作用=拥堵点状复刻。
+- **D_s43 d0 死因链**：东喉口 congestion → 投放释放后 18s 坠 z=0.20
+  hover-lock (16.64,8.42,0.20) → UNAUTHORIZED_LANDING 退休（retired[0]，
+  落分 -15：landed 4 + retire）。六连 curb 接触（dist 0.05-1.45）为低位
+  次生形态，非 P2 fence 机制（curb 反应层本来就开着）。
+
+### 判词
+
+- **P2 boundary_margin：翻默认 true**。逐 seed col 0/4/0 ≤ A 0/5/4、score
+  3×100、done_t 无回归、零 FAIL——"无 seed 劣化+机制正确"翻判（W1
+  obs_guard 同判据）。注：目标场景（西坪 fence 4 起）12 cell 零复现，
+  增益含环境方差成分；gz 后端真物理下的预防效果留待验证。
+- **P1 return_route v1：判毙，默认关保持**。南绕把车流挤进东喉口漏斗
+  （"改道=风险再分布"第四次复刻，hotspot_inflate/E/I 同判词）+ s43
+  landed 5/6 -10 分 + via 未拦住 pad 段北绕。预登记毙杀条件"返航+20s"
+  未命中（+15/+10/−15 在方差内），判毙依据=扣分事件+喉口拥堵形态。
+- **D 双开：判毙**（Σcol 18 全场最差 + 全矩阵唯一 FAIL）——立案执行序
+  "合开臂必须测"的预期收益：单独生效互不干扰的假设被证伪。
+- **P3 维持毙、P4 维持已落 fleet_monitor**（未重审）。
+
+### v2 方向（立案保留，未排期）
+
+喉口是真争缝形态（区别于 P3 毙掉的"个体贴树"）：tree#34/#41 间 2.7m
+咽喉要过六机。重评前提=先解喉口拥堵（错峰/单机化/喉口热点膨胀），且
+须同时核对"漏斗延时 vs 外圈暴露"的权衡。在此之前 return_route 默认关。
+
+### 工具债（本轮新增）
+
+- w2_matrix_run._run_once 曾在 report_settle_s=1.0 延迟写落地前 parse——
+  D_s43 行记 PASS 文件 FAIL 的 race 真身；已修（run 后 sleep 3.0）。
+- 返航时长对账（evidence 的 return start→TOUCHDOWN 时间戳）解析器未通，
+  done_t 差值（+15/+10/−15）作代理证据。

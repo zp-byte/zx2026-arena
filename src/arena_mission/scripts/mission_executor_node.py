@@ -207,6 +207,16 @@ class MissionExecutor:
         self._vs_margin = float(vs.get("zone_margin", 1.0))
         self._vs_slot = None    # 本机槽位（EXECUTE 入场时选定并缓存；None=回退共享点）
 
+        # ---- W2-P1 return_route：返航中缝路点（默认关，配置 mission.return_route） ----
+        # RETURN 裸骑北外圈 y≈12.2（离线核查 min_clear 0.020 @ (0.5,12.2)）——
+        # 先到中缝 (drop_x, via_y±jitter) 再去 pad。via_y 8.5=中缝唯一全宽
+        # 自由带 y 8.10..8.90 的带中心（w2_return_route_check.py 离线核查，
+        # 9.5/9.0 擦树 FAIL）。
+        rr = cfg.load("sim_settings.yaml").get("mission", {}).get("return_route", {}) or {}
+        self._rr_enabled = bool(rr.get("enabled", False))
+        self._rr_via_y = float(rr.get("via_y", 8.5))
+        self._rr_jitter = float(rr.get("jitter", 0.1))
+
         self.state = "IDLE"
         self.mission = None
         self.goal = None
@@ -836,9 +846,20 @@ class MissionExecutor:
                 self._publish_phase("RETURN")
                 # 两段式返航：先以巡航高度回到降落区上空，到位再降到悬停高度。
                 # 避免穿越林区时提前降到悬停高度(1.5m)在林缘死点卡住。
-                self._goto((self.pad[0], self.pad[1], self.cruise_z))
-                self._pending = "DESCEND_PAD"
-                rospy.loginfo("drone %d return start (cruise to pad)", self.drone_id)
+                # W2-P1 return_route（默认关）：三段式——先到中缝路点
+                # (drop_x, via_y±jitter) 再去 pad 上空，避免裸骑北外圈
+                # y≈12.2（第二排散树骑线，min_clear 0.020）。到达判定在
+                # 下方 RETURN 态 RETURN_VIA 分支。
+                if self._rr_enabled:
+                    vy = self._rr_via_y + self._rr_jitter * ((self.drone_id % 3) - 1)
+                    self._goto((self.drop[0], vy, self.cruise_z))
+                    self._pending = "RETURN_VIA"
+                    rospy.loginfo("drone %d RETURN-VIA (%.1f, %.1f)",
+                                  self.drone_id, self.drop[0], vy)
+                else:
+                    self._goto((self.pad[0], self.pad[1], self.cruise_z))
+                    self._pending = "DESCEND_PAD"
+                    rospy.loginfo("drone %d return start (cruise to pad)", self.drone_id)
             return
         if self.goal is None:
             return
@@ -889,7 +910,14 @@ class MissionExecutor:
                     z = self.drop_hover_z if self._cid_enabled else self.identify_z
                     self._goto((self.drop[0], self.drop[1], z))
         elif self.state == "RETURN":
-            if getattr(self, "_pending", None) == "DESCEND_PAD":
+            if getattr(self, "_pending", None) == "RETURN_VIA":
+                # W2-P1：已到中缝路点（巡航高度）→ 转 pad 上空（两段式后半）
+                if d < self.arrival_tol:
+                    self._pending = "DESCEND_PAD"
+                    self._goto((self.pad[0], self.pad[1], self.cruise_z))
+                    rospy.loginfo("drone %d RETURN-VIA reached, cruise to pad",
+                                  self.drone_id)
+            elif getattr(self, "_pending", None) == "DESCEND_PAD":
                 # 已到降落区上空(巡航高度)，下降到悬停高度（降落区无树，安全）
                 if d < self.arrival_tol:
                     self._pending = "TOUCHDOWN"

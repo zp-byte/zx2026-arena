@@ -297,6 +297,15 @@ class NavNode:
         self._hi_extra = int(hi.get("extra_cells", 1))
         self._hi_trees = [tuple(map(float, t)) for t in hi.get("trees", [])]
 
+        # ---- W2-P2 fence 边界余量（默认关） ----
+        # 反应层原本对 fence 一刀切 continue——西坪 pad 进场低空段贴 fence
+        # 0.35（W2 立案 4 起 APPROACH west_pad）与围栏顶角擦碰无近距推离。
+        # fence 是"必须越顶穿越的边界"（1.3m 顶 vs 巡航机身带下缘 1.45），
+        # A* 封格会复刻"pad 不可达"旧案——唯一正确杠杆=反应层纳入，靠通用
+        # z 带检查（hi[2] < pz-dr）在巡航越顶时自动豁免、低空擦碰时介入。
+        bm = cl.get("boundary_margin", {})
+        self._bm_enabled = bool(bm.get("enabled", False))
+
         # ---- P2 指令否决层（DeFoP M1 几何安全监督移植） ----
         vt = cl.get("veto_gate", {})
         self._vt_enabled = bool(vt.get("enabled", False))
@@ -1997,7 +2006,12 @@ class NavNode:
         pred_r = dr + 0.05
         px, py, pz = self.odom[0], self.odom[1], self.odom[2]
         for ob in self.scene.obstacles:
-            if ob.kind in ("fence", "marker"):
+            # W2-P2 boundary_margin（默认关）：fence 纳入反应层，z 带检查
+            # （下方 hi[2]<pz-dr）自动豁免巡航越顶、仅低空/顶缘擦碰介入；
+            # marker 恒跳过（投放目标须可进）。关=逐位原行为。
+            if ob.kind == "marker":
+                continue
+            if ob.kind == "fence" and not self._bm_enabled:
                 continue
             if ob.kind == "tree":
                 if ob.crown_z + ob.crown_r < pz - dr:
