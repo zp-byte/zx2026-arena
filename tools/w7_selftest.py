@@ -110,16 +110,18 @@ def t_tip_cap_math():
 
 
 def t_settings():
-    print("C. sim_settings 三旗默认关 + 非默认翻转读回")
+    print("C. sim_settings 三旗默认断言 + 非默认翻转读回")
     with io.open(CFG, encoding="utf-8") as f:
         st = yaml.safe_load(f)
     cl = st["closed_loop"]
     ph = cl["post_hit_calm"]
     hz = cl["hazard_share"]
     ts = cl["branch_handling"]["tip_slow"]
-    check("C1 post_hit_calm 默认关", ph["enabled"] is False)
-    check("C2 hazard_share 默认关", hz["enabled"] is False)
-    check("C3 tip_slow 默认关", ts["enabled"] is False)
+    # 20260920 w7_matrix 过线翻默认：C1+C2 绑定开（B1 单开判毙不可拆），
+    # C3 tip_slow 仍默认关（pilot 未跑）
+    check("C1 post_hit_calm 默认开（矩阵过线）", ph["enabled"] is True)
+    check("C2 hazard_share 默认开（与 C1 绑定）", hz["enabled"] is True)
+    check("C3 tip_slow 默认关（pilot 未跑）", ts["enabled"] is False)
     check("C4 C1 参数 hold=3 vcap=0.8 vcap_s=2",
           ph["hold_s"] == 3.0 and ph["vcap"] == 0.8 and ph["vcap_s"] == 2.0)
     check("C5 C2 topic=/zx2026/hazard_cells",
@@ -129,14 +131,14 @@ def t_settings():
           and ts["min_pts"] == 2 and ts["cone_deg"] == 35)
     check("C7 C3 z_band=[1.5,3.0]（含反应门盲区 2.5-3.0）",
           ts["z_band"] == [1.5, 3.0])
-    # 非默认值断言（mem6 教训）：翻旗后 yaml 侧读回 True——plumbing 可翻转
+    # 非默认值断言（mem6 教训）：翻旗后 yaml 侧读回翻转值——plumbing 双向可逆
     blob = io.open(CFG, encoding="utf-8").read()
     for key in ("post_hit_calm", "hazard_share"):
-        flipped = blob.replace("%s:\n    enabled: false" % key,
-                               "%s:\n    enabled: true" % key)
+        flipped = blob.replace("%s:\n    enabled: true" % key,
+                               "%s:\n    enabled: false" % key)
         st2 = yaml.safe_load(flipped)
         seg = st2["closed_loop"][key]
-        check("C8 %s 翻旗读回 true" % key, seg["enabled"] is True)
+        check("C8 %s 翻回 false 读回 False" % key, seg["enabled"] is False)
     flipped = blob.replace("tip_slow:\n      enabled: false",
                            "tip_slow:\n      enabled: true")
     st2 = yaml.safe_load(flipped)

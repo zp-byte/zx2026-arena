@@ -277,7 +277,7 @@ closed_loop:
     enabled: true           # 【2026-09-02 翻默认 true】见上判词
     corridor_w: 1.0         # 裕度权重（reach 单位 m，裕度归一 [0,1]）
 
-  # ---- W7-C1 撞后镇定窗（2026-09-20 gz 实弹 4 撞冠撞法证三臂之一；默认关待 A/B） ----
+  # ---- W7-C1 撞后镇定窗（2026-09-20 gz 实弹 4 撞冠撞法证三臂之一；B2 过线翻默认） ----
   # 法证（rosout 双源+Scene 实例化对树，memory/zx2026-gz-crown-collision-forensics）：
   # #1 撞 tree#A 冠缘后 gz bounce 2m/s×1s 朝 NE 与 nav 死端逃逸 pick 0.39rad
   # 同向叠加，把 d3 从冠区推进 3m 外 tree#B 冠区（#2 撞，clr=0.35 全场最差）
@@ -286,20 +286,26 @@ closed_loop:
   # 快照是半更新状态），窗止后 vcap_s 秒 0.8m/s 爬行限速让感知消化追上位置
   # 跳变。hold_s 取 bounce_dt 1.0+cooldown_dt 2.0（collision.recovery 时长）。
   post_hit_calm:
-    enabled: false          # 【默认关】A 臂=现状基线，B1=+C1；判据 Σcol→0、
-                            # minclr≥0.44（官宣线）、slack 不劣化（W4 预算律 41.3s）
+    enabled: true           # 【2026-09-20 翻默认 true】w7_matrix_20260920_152616 过线：
+                            # Σcol 8→5、score 280→300（py 裁判碰撞扣分 col>0→90）、
+                            # 零 FAIL、done_t 无回归（s45 还 -30s）、归因无挪移
+                            # （东带 x≈13 簇 4ep→0）。B1 单开判毙（s42 done+25s
+                            # 超 20s 线+s43 研磨仍在）——本旗不可单开，与
+                            # hazard_share 绑定翻（"单开不稳须合开"第五次复刻）
     hold_s: 3.0
     vcap: 0.8
     vcap_s: 2.0
 
-  # ---- W7-C2 碰撞热点舰队广播（三臂之二；默认关待 A/B） ----
+  # ---- W7-C2 碰撞热点舰队广播（三臂之二；随 C1 绑定翻默认） ----
   # 法证：热点树 tree(-4.58,6.95)（最大干 r=0.26）一棵吃 2/4 撞（d3#2+d2#1），
   # 林带 x∈[-7,-1] y∈[4,9] GO/返航双程必经。本机碰撞点 latched 广播全队
   # （事件真值独立持久，与本地碰撞标记同语义膨胀），他人提前绕开同点；晚
   # 启动/重启机收全史。接收方按 xy 本地取格防栅格参数漂移，own-id 跳过。
   # 静态危险格共享，非活体机间观测（与 W6 VO-lite 互补不互斥）。
   hazard_share:
-    enabled: false          # 【默认关】B2=+C1+C2；单臂差异归因需 B1 先过线
+    enabled: true           # 【2026-09-20 翻默认 true】与 post_hit_calm 绑定（B2 臂
+                            # 整体过线）：东带 x≈13 投送走廊簇 4ep→0 为 C2 直接
+                            # 战果；HZ=5×CALM 全 peer 收讫（链路端到端实证）
     topic: /zx2026/hazard_cells
 
   # ---- 全史碰撞聚类驱动的两项避障优化（2026-09-03，默认关） ----------------
