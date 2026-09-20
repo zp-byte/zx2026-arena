@@ -277,6 +277,31 @@ closed_loop:
     enabled: true           # 【2026-09-02 翻默认 true】见上判词
     corridor_w: 1.0         # 裕度权重（reach 单位 m，裕度归一 [0,1]）
 
+  # ---- W7-C1 撞后镇定窗（2026-09-20 gz 实弹 4 撞冠撞法证三臂之一；默认关待 A/B） ----
+  # 法证（rosout 双源+Scene 实例化对树，memory/zx2026-gz-crown-collision-forensics）：
+  # #1 撞 tree#A 冠缘后 gz bounce 2m/s×1s 朝 NE 与 nav 死端逃逸 pick 0.39rad
+  # 同向叠加，把 d3 从冠区推进 3m 外 tree#B 冠区（#2 撞，clr=0.35 全场最差）
+  # ——sep_obs_guard 只管分离推力，管不到物理反弹+逃逸推力。机制=碰撞后
+  # hold_s 内逃逸不开新窗、不重选方向（物理弹开仍在改写位置，此刻栅格/云
+  # 快照是半更新状态），窗止后 vcap_s 秒 0.8m/s 爬行限速让感知消化追上位置
+  # 跳变。hold_s 取 bounce_dt 1.0+cooldown_dt 2.0（collision.recovery 时长）。
+  post_hit_calm:
+    enabled: false          # 【默认关】A 臂=现状基线，B1=+C1；判据 Σcol→0、
+                            # minclr≥0.44（官宣线）、slack 不劣化（W4 预算律 41.3s）
+    hold_s: 3.0
+    vcap: 0.8
+    vcap_s: 2.0
+
+  # ---- W7-C2 碰撞热点舰队广播（三臂之二；默认关待 A/B） ----
+  # 法证：热点树 tree(-4.58,6.95)（最大干 r=0.26）一棵吃 2/4 撞（d3#2+d2#1），
+  # 林带 x∈[-7,-1] y∈[4,9] GO/返航双程必经。本机碰撞点 latched 广播全队
+  # （事件真值独立持久，与本地碰撞标记同语义膨胀），他人提前绕开同点；晚
+  # 启动/重启机收全史。接收方按 xy 本地取格防栅格参数漂移，own-id 跳过。
+  # 静态危险格共享，非活体机间观测（与 W6 VO-lite 互补不互斥）。
+  hazard_share:
+    enabled: false          # 【默认关】B2=+C1+C2；单臂差异归因需 B1 先过线
+    topic: /zx2026/hazard_cells
+
   # ---- 全史碰撞聚类驱动的两项避障优化（2026-09-03，默认关） ----------------
   # 734 事件（python 706/131run + gazebo 28/6run）聚类：Top4 树占 41%
   # （tree#28 (-12.2,6.1) 一树 145 次=20%），主形态=分离硬推（障碍全盲）
@@ -574,6 +599,24 @@ closed_loop:
     # （2.0 > cruise 1.8，至少抵消进近）。只作用于 sign_fix 分支正在接近
     # (v_in>0) 的点。
     ca_iso_floor: 0.0         # 0=关（逐位原行为）；>0 = 孤立点最小推速 (m/s)
+
+    # ---- W7-C3 TIP 预测性减速（三臂之三；默认关，pilot 串行验证） ----
+    # 法证：d3#3 撞点距树轴 1.96 > 冠阈 1.55=物理枝干伸出 nav 冠模型（TIP
+    # 超模型）；d2#1 nav 自估 clr=1.18 照撞（冠缘稀疏回波被孤立点滤/消化
+    # 滞后吃）。现有反应门 |z-pz|≤dr+0.3 对冠区上半（z 2.5-3.0）盲。机制=
+    # 沿指令前向锥扫枝梢 z 带云点（self.cloud=mem6 聚合，记忆窗≥反应窗穿越
+    # 0.41s 定量律反演 react_t），d_edge → v_cap=(d_edge-margin)/react_t，
+    # 地板=max_vel×floor_frac（与 vcap 地板同源）。只缩模不改向；min_pts
+    # 门防孤立噪声误刹；与 vcap/O4 取交（更严者生效）。
+    tip_slow:
+      enabled: false          # 【默认关】C3 pilot 串行（B 判据定谳后单独 A/B）
+      z_band: [1.5, 3.0]      # 枝带 0.8-2.6 ∩ 巡航带下沿之上；含冠区上半（反应门盲区）
+      cone_deg: 35
+      engage_r: 2.5
+      margin: 0.5
+      react_t: 0.41
+      min_pts: 2
+      floor_frac: 0.35
 
 # ---- 仿真树枝层（真机树枝场景建模；默认关=现行无枝基线逐位不变） ---------------
 # 每树生成 per_tree 根细枝：世界系线段+半径（起点在树干表面，水平略下倾）。

@@ -13,6 +13,7 @@
                   est_pose（置信位姿）与点云建图，不再读 scene.obstacles/collides_xy。
 """
 import heapq
+import json
 import math
 import random
 import struct
@@ -20,7 +21,7 @@ from collections import deque
 
 import rospy
 import numpy as np
-from std_msgs.msg import Bool, Float32MultiArray
+from std_msgs.msg import Bool, Float32MultiArray, String
 from nav_msgs.msg import Odometry, OccupancyGrid
 from geometry_msgs.msg import Twist, PoseStamped, Vector3Stamped
 from sensor_msgs.msg import PointCloud2
@@ -136,6 +137,31 @@ def bh_uncertain_t(px, py, ux, uy, gocc_unc, ray, step, corridor,
             continue
         return tc
     return None
+
+
+def tip_band_scan(pts, px, py, ux, uy, z_lo, z_hi, cos_cone, engage_r):
+    """W7-C3 前向锥枝梢带扫描核心（纯函数，tools/w7_selftest.py 离线验证）。
+
+    在世界系点集 pts 中统计：z ∈ [z_lo,z_hi]、水平距离 ∈ (0,engage_r]、
+    与指令方向 (ux,uy) 夹角 ≤ 锥半角（cos_cone 给定）的点。返回
+    (d_edge, n_in)=锥内最近点距离与点数（min_pts 门槛由调用方判）。
+    """
+    d_edge = None
+    n_in = 0
+    for (x, y, z) in pts:
+        if z < z_lo or z > z_hi:
+            continue
+        dx = x - px
+        dy = y - py
+        d = math.hypot(dx, dy)
+        if d < 1e-3 or d > engage_r:
+            continue
+        if (dx * ux + dy * uy) / d < cos_cone:
+            continue
+        n_in += 1
+        if d_edge is None or d < d_edge:
+            d_edge = d
+    return d_edge, n_in
 
 
 class NavNode:
@@ -366,6 +392,35 @@ class NavNode:
         # ≥ 该值（2.0 > cruise 1.8，至少抵消进近；切向/包络边缘点不再漏推）。
         self._ca_iso_floor = float(bh.get("ca_iso_floor", 0.0))
 
+        # ---- W7 冠撞修复三臂（2026-09-20 gz 实弹 4 撞法证；默认全关待 A/B） ----
+        # 法证：4 撞全落枝冠/枝梢高度（1.80-1.94）零树干直撞。三族根因=
+        # ①弹向级联+逃逸盲推（gz bounce 与死端逃逸 pick 同向叠加）；②TIP
+        # 超模型（gz 物理枝干伸出 nav 冠模型，撞点距树轴 1.96>阈 1.55）；
+        # ③低速贴冠挤入+冠缘欠采样（nav 自估 clr=1.18 照撞，云点被孤立点
+        # 滤/消化滞后吃掉）。机制详见 sim_settings closed_loop 三段判词。
+        ph = cl.get("post_hit_calm", {})
+        self._ph_enabled = bool(ph.get("enabled", False))
+        self._ph_hold_s = float(ph.get("hold_s", 3.0))
+        self._ph_vcap = float(ph.get("vcap", 0.8))
+        self._ph_vcap_s = float(ph.get("vcap_s", 2.0))
+        self._ph_hold_until = -1e9   # C1 逃逸冻结窗止（engagement/重选不开）
+        self._ph_vcap_until = -1e9   # C1 撞后爬行限速窗止
+        hz = cl.get("hazard_share", {})
+        self._hz_enabled = bool(hz.get("enabled", False))
+        self._hz_topic = str(hz.get("topic", "/zx2026/hazard_cells"))
+        self._hazard_obs = set()     # C2 舰队共享危险格 (ix,iy)（事件真值，持久）
+        ts = bh.get("tip_slow", {}) or {}
+        self._tip_enabled = bool(ts.get("enabled", False))
+        tsz = ts.get("z_band", [1.5, 3.0])
+        self._tip_z_lo, self._tip_z_hi = float(tsz[0]), float(tsz[1])
+        self._tip_cone = math.radians(float(ts.get("cone_deg", 35.0)))
+        self._tip_engage_r = float(ts.get("engage_r", 2.5))
+        self._tip_margin = float(ts.get("margin", 0.5))
+        self._tip_react_t = float(ts.get("react_t", 0.41))
+        self._tip_min_pts = int(ts.get("min_pts", 2))
+        self._tip_floor = float(ts.get("floor_frac", 0.35))
+        self._tip_hits = 0           # C3 触发计数（法证采样，验证日志证据用）
+
         # ---- 风前馈（顶风补偿，抵消共享风稳态漂移） ----
         # 风项 acc += (wind-vel)/tau 是速度耦合扰动，nav 指令减去共享风（mean+阵风）
         # 即"朝风指令"，悬停偏移从 w/1.2 降到 ~0.14w。仅 wind.enabled 时订阅
@@ -550,6 +605,11 @@ class NavNode:
         if self.closed_loop:
             rospy.Subscriber(ns + "/cloud", PointCloud2, self._on_cloud)
             self._collision_obs = set()  # 碰撞标记：绕过 footprint clearing 的占用格
+            if self._hz_enabled:
+                # W7-C2 舰队危险格广播：latched 话题（晚启动/重启机收全史）
+                self._hz_pub = rospy.Publisher(self._hz_topic, String,
+                                               queue_size=8, latch=True)
+                rospy.Subscriber(self._hz_topic, String, self._on_hazard_cell)
         for j in range(self.scene.drone_count):
             if j == self.drone_id:
                 continue
@@ -563,11 +623,13 @@ class NavNode:
 
         self.last_plan_t = -1.0
         rospy.loginfo("nav_node: drone %d closed_loop=%s max_vel=%.1f cruise_z=%.1f "
-                      "tc=%s de=%s veto=%s metrics=%s soa=%s swg=%s swq=%s vo=%s",
+                      "tc=%s de=%s veto=%s metrics=%s soa=%s swg=%s swq=%s vo=%s "
+                      "ph=%s hz=%s tip=%s",
                       self.drone_id, self.closed_loop, self.max_vel, self.cruise_z,
                       self.tc_enabled, self._de_enabled, self._vt_enabled,
                       self.metrics_enabled, self._soa_enabled, self._swg_enabled,
-                      self._swq_enabled, self._vo_enabled)
+                      self._swq_enabled, self._vo_enabled,
+                      self._ph_enabled, self._hz_enabled, self._tip_enabled)
 
     # ---- callbacks ------------------------------------------------------------
     def _on_wind(self, msg):
@@ -650,11 +712,30 @@ class NavNode:
         else:
             self._collision_obs.add((cx, cy))
         self._rebuild_global_grid()
+        if self._hz_enabled and hasattr(self, "_hz_pub"):
+            # W7-C2 热点舰队广播：本机碰撞点 latched 共享。接收方按 xy 本地
+            # 取格（防各机栅格参数漂移）、own-id 跳过，见 _on_hazard_cell。
+            self._hz_pub.publish(String(data=json.dumps(
+                {"id": int(self.drone_id),
+                 "x": float(self.est_pos[0]), "y": float(self.est_pos[1]),
+                 "t": float(rospy.get_time())})))
         if self.tc_enabled:
             # 粘滞模式下路径不随栅格周期重选：碰撞后必须立即强制绕开
             self._grid_t = rospy.get_time()
             self._path_force = True
-        if self._de_enabled and self._de_active:
+        if self._ph_enabled:
+            # W7-C1 撞后镇定窗：bounce(1s)+cooldown(2s) 内逃逸不开新窗、
+            # 不重选方向（物理弹开仍在改写位置，栅格/云快照是半更新状态
+            # ——本局 d3#1 bounce 与逃逸 pick 同向叠加把机推进 3m 外
+            # tree#B 冠区）。撞中逃逸保持当前方向缓行（冻结期 _de_tick
+            # 直接 return），窗止后 vcap_s 秒爬行限速（_apply_post_hit_cap）。
+            now_c = rospy.get_time()
+            self._ph_hold_until = now_c + self._ph_hold_s
+            self._ph_vcap_until = now_c + self._ph_hold_s + self._ph_vcap_s
+            rospy.loginfo("nav_node: drone %d POST-HIT CALM armed hold=%.1fs "
+                          "vcap=%.1f@+%ds", self.drone_id, self._ph_hold_s,
+                          self._ph_vcap, self._ph_vcap_s)
+        elif self._de_enabled and self._de_active:
             self._de_t0 = -1e9   # 逃逸中再碰撞：下拍强制重选逃逸方向
         # W1 遥测：接触法向闭合速度 + 接触距离。慢速贴树挤入是全史主形态
         # （0.12-0.98 m/s 全低速带），闭合速度是它的定义性指标——比碰撞计数
@@ -664,6 +745,32 @@ class NavNode:
                       "close=%.2f clr=%.2f",
                       self.drone_id, self.est_pos[0], self.est_pos[1], cx, cy,
                       v_close, clr_now)
+
+    def _on_hazard_cell(self, msg):
+        """W7-C2 接收舰队危险格广播：他人碰撞点入本机占用（事件真值，与
+        本地碰撞标记同语义：硬占用+同窗膨胀、独立持久）。跳过自己；坐标
+        按 xy 本地取格。"""
+        if not (self.closed_loop and self._hz_enabled):
+            return
+        try:
+            d = json.loads(msg.data)
+        except Exception:
+            return
+        if int(d.get("id", -1)) == int(self.drone_id):
+            return
+        try:
+            hx, hy = self._g_to_cell(float(d["x"]), float(d["y"]))
+        except (KeyError, TypeError, ValueError):
+            return
+        if not (0 <= hx < self.g_nx and 0 <= hy < self.g_ny):
+            return
+        if (hx, hy) in self._hazard_obs:
+            return
+        self._hazard_obs.add((hx, hy))
+        rospy.loginfo("nav_node: drone %d HAZARD-SHARE <- drone %s cell (%d,%d) "
+                      "n=%d", self.drone_id, d.get("id"), hx, hy,
+                      len(self._hazard_obs))
+        self._rebuild_global_grid()
 
     def _closing_speed(self):
         """接触法向闭合速度遥测：本机速度在"指向最近点云点"方向上的投影
@@ -824,6 +931,14 @@ class NavNode:
                     col_occ[ciy, cix] = True
             col_occ = self._dilate_rect(col_occ, infl)
             occ = occ | col_occ
+        # W7-C2 舰队共享危险格：与本地碰撞标记同语义（事件真值+同窗膨胀）
+        if self._hazard_obs:
+            hz_occ = np.zeros((self.g_ny, self.g_nx), dtype=bool)
+            for (hix, hiy) in self._hazard_obs:
+                if 0 <= hix < self.g_nx and 0 <= hiy < self.g_ny:
+                    hz_occ[hiy, hix] = True
+            hz_occ = self._dilate_rect(hz_occ, infl)
+            occ = occ | hz_occ
         self._gocc_infl = occ
         self._publish_occ_grid()
 
@@ -879,6 +994,15 @@ class NavNode:
                     col_occ[ciy, cix] = True
             col_occ = self._dilate_rect(col_occ, infl)
             occ = occ | col_occ
+        # W7-C2 舰队共享危险格：插在足迹清除之后（他人碰撞点不在自机足迹
+        # 内，无自封风险），与本地碰撞标记同语义（硬占用+同窗膨胀、持久）
+        if self._hazard_obs:
+            hz_occ = np.zeros((self.g_ny, self.g_nx), dtype=bool)
+            for (hix, hiy) in self._hazard_obs:
+                if 0 <= hix < self.g_nx and 0 <= hiy < self.g_ny:
+                    hz_occ[hiy, hix] = True
+            hz_occ = self._dilate_rect(hz_occ, infl)
+            occ = occ | hz_occ
         self._gocc_infl = occ
         self._gocc_unc = unc
         self._rebuild_n += 1
@@ -1408,6 +1532,12 @@ class NavNode:
                     return
             else:
                 self._de_ok_t0 = None
+            if now < self._ph_hold_until:
+                rospy.loginfo_throttle(
+                    2.0, "nav_node: drone %d POST-HIT FREEZE escape re-pick "
+                    "deferred (%.1fs left)", self.drone_id,
+                    self._ph_hold_until - now)
+                return   # W7-C1 镇定窗：逃逸方向冻结（不重选，缓行）
             if self._de_dir is None or now - self._de_t0 >= self._de_dwell:
                 self._de_dir = self._de_pick_dir()
                 self._de_t0 = now
@@ -1419,8 +1549,15 @@ class NavNode:
         if self._plan_fail_since is not None:
             if self._de_fail_t0 is None:
                 self._de_fail_t0 = now
-            elif now - self._de_fail_t0 >= self._de_confirm:
+            elif (now - self._de_fail_t0 >= self._de_confirm
+                  and now >= self._ph_hold_until):
+                # W7-C1：镇定窗内不开新逃逸窗（确认计时保持，窗止即接续）
                 self._de_active = True
+            elif now < self._ph_hold_until:
+                rospy.loginfo_throttle(
+                    2.0, "nav_node: drone %d POST-HIT HOLD escape engage "
+                    "deferred (%.1fs left)", self.drone_id,
+                    self._ph_hold_until - now)
                 self._de_total_t0 = now
                 self._de_t0 = now
                 self._de_ok_t0 = None
@@ -1978,6 +2115,59 @@ class NavNode:
         cmd[1] *= s
         return cmd
 
+    # ---- W7-C3 TIP 预测性减速（默认关；gz 冠撞法证三臂之三） -----------------
+    # 病灶：反应门 |z-pz|≤dr+0.3 对冠区上半（z 2.5-3.0）是盲的，vcap 按全向
+    # 最小澄度缩速同样只见门内带；物理枝干伸出冠模型+冠缘稀疏回波被孤立点
+    # 滤吃掉（d2#1 自估 clr=1.18 照撞）。本层沿指令前向锥独立扫枝梢 z 带
+    # （self.cloud=mem6 聚合体，记忆窗≥反应窗穿越——mem6 定量律），取
+    # d_edge → v_cap=(d_edge-margin)/react_t（react_t=0.41s 定量律反演）。
+    # 只缩模不改向；min_pts 门防孤立噪声误刹；与 vcap/O4 取交（更严者生效）。
+    def _apply_tip_slow(self, cmd):
+        if not (self.closed_loop and self._tip_enabled):
+            return cmd
+        vh = math.hypot(cmd[0], cmd[1])
+        if vh < 0.05 or not self.cloud:
+            return cmd
+        ux = cmd[0] / vh
+        uy = cmd[1] / vh
+        # 扫描核心=tip_band_scan 模块级纯函数（tools/w7_selftest.py 离线验证）
+        d_edge, n_in = tip_band_scan(
+            self.cloud, self.est_pos[0], self.est_pos[1], ux, uy,
+            self._tip_z_lo, self._tip_z_hi, math.cos(self._tip_cone),
+            self._tip_engage_r)
+        if d_edge is None or n_in < self._tip_min_pts:
+            return cmd
+        v_cap = (d_edge - self._tip_margin) / self._tip_react_t
+        v_cap = max(self._tip_floor * self.max_vel, min(self.max_vel, v_cap))
+        if vh <= v_cap:
+            return cmd
+        s = v_cap / vh
+        self._tip_hits += 1
+        if (self._tip_hits % 50) == 1:
+            rospy.loginfo("nav_node: drone %d TIP-SLOW v_cmd=%.2f v_cap=%.2f "
+                          "d_edge=%.2f n=%d", self.drone_id, vh, v_cap,
+                          d_edge, n_in)
+        cmd[0] *= s
+        cmd[1] *= s
+        return cmd
+
+    # ---- W7-C1 撞后爬行限速（镇定窗第二段） ----------------------------------
+    # bounce+cooldown 期间执行器已被恢复链路隔离（lock_cmd 丢弃 vel_cmd），
+    # 本层管窗止后 vcap_s 秒：0.8m/s 爬行让感知消化追上位置跳变，防"恢复
+    # 即全速冲进半更新栅格"。只缩水平模；与 vcap/O4/tip 取交（更严者生效）。
+    def _apply_post_hit_cap(self, cmd, now):
+        if not (self.closed_loop and self._ph_enabled):
+            return cmd
+        if now >= self._ph_vcap_until:
+            return cmd
+        vh = math.hypot(cmd[0], cmd[1])
+        if vh <= self._ph_vcap:
+            return cmd
+        s = self._ph_vcap / vh
+        cmd[0] *= s
+        cmd[1] *= s
+        return cmd
+
     # ---- god-mode：动量感知静态避障（scene 真值，原版逻辑） -----------------
     def _apply_scene_avoidance(self, cmd):
         dr = self.scene.drone_radius
@@ -2173,6 +2363,9 @@ class NavNode:
         cmd = self._apply_veto(cmd)
         # O4 不确定减速：弱证据格跨格限速（真机树枝；默认关零侵入），见方法
         cmd = self._apply_uncertain_slow(cmd)
+        # W7 冠撞修复（默认关零侵入）：C1 撞后爬行限速 + C3 TIP 预测性减速
+        cmd = self._apply_post_hit_cap(cmd, now)
+        cmd = self._apply_tip_slow(cmd)
 
         # 停滞看门狗（纯观测）：未到 goal 而持续近零速 → 1Hz 诊断日志。
         # 各形态死锁（flap 停滞/贴靠平衡/磨树）从此日志自证，不再靠trace反推。
