@@ -177,6 +177,25 @@ def t_hazard():
           "(%d,%d)" % (cx, cy))
 
 
+def t_branch_order():
+    print("E. _de_tick 分支结构哨兵（W7 分支错位回归）")
+    # 错位形态：engagement 主体挂进 HOLD-defer 分支 → B 臂 hold 内 20Hz
+    # "engaged" 日志风暴+pick 空转、A 臂 engage 永久静默。正确序：engaged
+    # 主体在扣压分支之前（源码序）。
+    src = io.open(os.path.join(WS, "src", "arena_nav", "scripts",
+                               "nav_node.py"), encoding="utf-8").read()
+    i_engaged = src.find("DEAD-END escape engaged")
+    # 源码里该日志串断行为两个相邻字面量（"...engage " + "deferred (...)"），
+    # 连续搜索须截到断行点（mem6 教训：干测断言先对源码实测）
+    i_defer = src.find("POST-HIT HOLD escape engage")
+    check("E1 engaged 主体在 HOLD-defer 之前", 0 < i_engaged < i_defer,
+          "engaged@%d defer@%d" % (i_engaged, i_defer))
+    # 扣压分支内不得有 pick/状态初始化（风暴源头）；窗取到 _de_tick 函数尾
+    i_next = src.find("def _de_dir_str", i_defer)
+    tail = src[i_defer:i_next] if i_next > 0 else src[i_defer:i_defer + 300]
+    check("E2 HOLD-defer 分支无 _de_pick_dir", "_de_pick_dir" not in tail)
+
+
 def main():
     lines = []
     orig = sys.stdout
@@ -196,6 +215,7 @@ def main():
     t_tip_cap_math()
     t_settings()
     t_hazard()
+    t_branch_order()
     print("")
     if FAILS:
         print("结果: %d FAIL → %s" % (len(FAILS), ", ".join(FAILS)))

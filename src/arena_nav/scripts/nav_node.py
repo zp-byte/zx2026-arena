@@ -1553,17 +1553,17 @@ class NavNode:
                   and now >= self._ph_hold_until):
                 # W7-C1：镇定窗内不开新逃逸窗（确认计时保持，窗止即接续）
                 self._de_active = True
-            elif now < self._ph_hold_until:
-                rospy.loginfo_throttle(
-                    2.0, "nav_node: drone %d POST-HIT HOLD escape engage "
-                    "deferred (%.1fs left)", self.drone_id,
-                    self._ph_hold_until - now)
                 self._de_total_t0 = now
                 self._de_t0 = now
                 self._de_ok_t0 = None
                 self._de_dir = self._de_pick_dir()
                 rospy.loginfo("nav_node: drone %d DEAD-END escape engaged dir=%s",
                               self.drone_id, self._de_dir_str())
+            elif now < self._ph_hold_until:
+                rospy.loginfo_throttle(
+                    2.0, "nav_node: drone %d POST-HIT HOLD escape engage "
+                    "deferred (%.1fs left)", self.drone_id,
+                    self._ph_hold_until - now)
         else:
             self._de_fail_t0 = None
 
