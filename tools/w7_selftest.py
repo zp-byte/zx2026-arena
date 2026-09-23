@@ -144,6 +144,14 @@ def t_settings():
     st2 = yaml.safe_load(flipped)
     check("C9 tip_slow 翻旗读回 true",
           st2["closed_loop"]["branch_handling"]["tip_slow"]["enabled"] is True)
+    # 诚实化 20260923（作弊审查整改）：真值泄漏面翻默认断言
+    vs = (st.get("mission", {}) or {}).get("via_slots", {}) or {}
+    check("C10 via_slots source=cloud（选槽查自己点云，truth=god 臂）",
+          vs.get("source") == "cloud")
+    rules_p = os.path.join(WS, "src/zx2026_common/config/competition_rules.yaml")
+    rules = yaml.safe_load(io.open(rules_p, encoding="utf-8"))
+    check("C11 color_id source=camera（识别诚实化，truth=god 臂）",
+          (rules.get("color_id", {}) or {}).get("source") == "camera")
 
 
 def t_hazard():

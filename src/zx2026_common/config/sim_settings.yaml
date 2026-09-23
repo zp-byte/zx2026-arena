@@ -73,6 +73,12 @@ mission:
     enabled: true           # tree#24 (1.1,2.0) 树干上——六机漏斗串行 + goal 格恒占用
                             # 【默认开，matrix_w1b 20260903 后翻：zone_margin 修复
                             # 绊线误杀后 12/12 全 PASS，D 臂 VIA-SLOT 18 行/回退 0】
+    source: cloud           # 【诚实化 2026-09-23 翻默认】cloud=槽位净空查本机点云
+                            # 占用格（executor 订 /drone_<id>/cloud，map_z_band
+                            # 内观测点 0.5m 栅格化；未观测区域放行=几何散点，
+                            # 反漏斗意图由 y 带结构保持，飞行中 A*/反应层兜底）；
+                            # truth=Scene 真值净空验证（god 对照臂）。
+                            # 作弊审查定谳：真值模式=机群读到了没飞到的林子。
     slot_clear: 1.5         # → A* 5×5 幻影豁免长期在线 + GOAL-SEAL 盲推。散点把汇聚
     slot_sep: 2.5           # 点换成 6 个真值净空验证过的点（吸引子层唯一修复，判官团
                             # Tier-1 首位）。y 向散开=zone 均分 6 条横带每带一槽

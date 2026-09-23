@@ -41,11 +41,12 @@ heights:
 # enabled=false 时逐位回退旧行为（任务直配投放点 + /detected/type 类型匹配）
 color_id:
   enabled: true
-  source: truth           # 默认=感知链（2026-09-10 默认开旗：sim/real 同代码）；
-                           # truth=回退显式（真值几何门控，逐位现行为）；camera=下视
-                           # 相机图像识别（camera_sim_node 渲染 + color_detector HSV，
-                           # 真机 D435 同代码）。source=camera 时真值 tag_detector
-                           # 自门控让位，结构互斥。
+  source: camera          # 【诚实化 2026-09-23 翻默认】camera=下视相机 HSV 识别
+                          # （camera_sim_node 渲染 + color_detector，真机 D435
+                          # 同代码，c016b0e E2E 已过）；truth=真值几何门控
+                          # （god 对照臂，A/B 用）。作弊审查定谳：truth=识别
+                          # 理想化（机群无需看见平台即知颜色）。source=camera
+                          # 时真值 tag_detector 自门控让位，结构互斥。
   scan_dwell_s: 2.0        # 每平台悬停侦察最短停留(s)
   min_conf: 0.8            # 识别置信度门槛
   n_frames: 3              # 连续命中帧数（bucket_select）

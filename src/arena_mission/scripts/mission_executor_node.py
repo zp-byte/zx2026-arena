@@ -4,7 +4,8 @@
 
 输入: /drone_<id>/odom, /zx2026/mission/<drone_id> (Mission),
       /zx2026/state (String), /drone_<id>/match/result (String),
-      /drone_<id>/payload/done (Bool)
+      /drone_<id>/payload/done (Bool),
+      /drone_<id>/cloud (PointCloud2，via_slots cloud 模式占用格累计)
 输出: /drone_<id>/planning/goal (PoseStamped),
       /drone_<id>/mission/phase (String),
       /drone_<id>/mission/at_drop (Bool),
@@ -23,6 +24,8 @@ import numpy as np
 from std_msgs.msg import String, Bool, UInt8, Int32, Float32
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs import point_cloud2 as pc2
 
 from zx2026_common import config as cfg
 from zx2026_common import scene as sc
@@ -36,8 +39,13 @@ from zx2026_common.msg import Mission, TaskUpdate
 # 共享越界点 = 穿越区重心 (1.0,2.0)，几乎压在 tree#24 (1.1,2.0) 树干上：
 # 六机漏斗串行过同一点 + goal 格恒被真树占用 → nav 侧"goal 周边 5×5 幻影
 # 豁免"长期在线 + 停滞 3s 时 GOAL-SEAL 0.8 m/s 朝真树盲推——吸引子层根因。
-# 散点槽位把六机汇聚点换成六个真值净空验证过的点，A* 与反应层完全自由
+# 散点槽位把六机汇聚点换成六个净空验证过的点，A* 与反应层完全自由
 # （零改道）。纯几何无 ROS，tools/ 自检脚本可直接 import 复用。
+# 【诚实化 2026-09-23】真值净空验证=机群读到了没飞到的林子（作弊审查定谳
+# 的最大真值泄漏）。翻默认 source=cloud：槽位净空改查本机点云占用格
+# （0.5m 栅格，飞行带 map_z_band 内的观测点），未观测区域放行=纯几何散点
+# （反漏斗意图由 y 带结构保持），飞行中 A*/反应层兜底。truth 保留为 god
+# 对照臂。
 # ---------------------------------------------------------------------------
 def _slot_clearance(scene, x, y, z_lo, z_hi):
     """点 (x,y) 在 z 带 [z_lo,z_hi] 内对全部占用障碍的最小表面净空（m）。
@@ -62,8 +70,35 @@ def _slot_clearance(scene, x, y, z_lo, z_hi):
     return best
 
 
+def _slot_clearance_cloud(obs_cells, x, y, clear, cell=0.5):
+    """点 (x,y) 到本机已观测占用格的最小表面距离（诚实选槽，2026-09-23）。
+
+    obs_cells = {(ix, iy), ...}：本机点云里 z 落在飞行带内的观测点按 cell
+    栅格化。距离取到格矩形的表面距离（任意格内点都 ≥ 此值=保守不假放）。
+    只否决已观测障碍邻域；未观测区域返回极大值（放行——进场前云记忆为空
+    是物理事实，反漏斗意图由 y 带结构保持，飞行中 A*/反应层兜底）。
+    """
+    best = 1e9
+    r = int(math.ceil(clear / cell)) + 1
+    ix, iy = int(math.floor(x / cell)), int(math.floor(y / cell))
+    half = cell * 0.5
+    for dx in range(-r, r + 1):
+        for dy in range(-r, r + 1):
+            if (ix + dx, iy + dy) not in obs_cells:
+                continue
+            cx = (ix + dx + 0.5) * cell
+            cy = (iy + dy + 0.5) * cell
+            ddx = max(abs(x - cx) - half, 0.0)
+            ddy = max(abs(y - cy) - half, 0.0)
+            d = math.hypot(ddx, ddy)
+            if d < best:
+                best = d
+    return best
+
+
 def select_via_slots(scene, drone_count, slot_clear=1.5, slot_sep=2.5,
-                     cand_step=0.5, z_lo=2.0, z_hi=3.0, zone_margin=1.0):
+                     cand_step=0.5, z_lo=2.0, z_hi=3.0, zone_margin=1.0,
+                     obs_cells=None, obs_cell=0.5):
     """在穿越区内选 drone_count 个净空达标的散点槽位（纯几何，无 ROS）。
 
     候选格按 cand_step 铺满穿越区内缩区，逐格过 in_crossing_zone + 表面
@@ -104,7 +139,11 @@ def select_via_slots(scene, drone_count, slot_clear=1.5, slot_sep=2.5,
                 px = min(x0 + ix * cand_step, x1)
                 if not scene.in_crossing_zone((px, py)):
                     continue
-                clr = _slot_clearance(scene, px, py, z_lo, z_hi)
+                if obs_cells is None:
+                    clr = _slot_clearance(scene, px, py, z_lo, z_hi)
+                else:   # 诚实模式：净空查本机点云占用格，未观测=放行
+                    clr = _slot_clearance_cloud(obs_cells, px, py,
+                                                slot_clear, obs_cell)
                 if clr >= slot_clear:
                     bi = min(int((py - b0) / band_h), drone_count - 1)
                     bands[bi].append((clr, px, py))
@@ -200,11 +239,20 @@ class MissionExecutor:
         self.return_at = None
 
         # ---- W1 via_slots：越界点散点槽位（matrix_w1b 后默认开，配置 mission.via_slots） ----
+        # 2026-09-23 诚实化：source=cloud（默认）时槽位净空查本机点云占用格
+        # （订阅 /drone_<id>/cloud，飞行带内观测点栅格化）；truth=旧真值净空
+        # （god 对照臂）。未观测区域放行，反漏斗意图由 y 带结构保持。
         vs = cfg.load("sim_settings.yaml").get("mission", {}).get("via_slots", {}) or {}
         self._vs_enabled = bool(vs.get("enabled", False))
+        self._vs_source = str(vs.get("source", "cloud"))
         self._vs_clear = float(vs.get("slot_clear", 1.5))
         self._vs_sep = float(vs.get("slot_sep", 2.5))
         self._vs_margin = float(vs.get("zone_margin", 1.0))
+        _mzb = ((cfg.load("sim_settings.yaml").get("closed_loop", {}) or {})
+                .get("branch_handling", {}) or {}).get("map_z_band") or \
+            [self.cruise_z - 0.5, self.cruise_z + 0.5]
+        self._vs_zband = (float(_mzb[0]), float(_mzb[1]))
+        self._vs_obs_cells = set()   # 本机点云占用格 {(ix,iy)}（0.5m，_on_cloud 累计）
         self._vs_slot = None    # 本机槽位（EXECUTE 入场时选定并缓存；None=回退共享点）
 
         # ---- W2-P1 return_route：返航中缝路点（默认关，配置 mission.return_route） ----
@@ -291,6 +339,11 @@ class MissionExecutor:
                          self._on_retire)
         # 碰撞感知重分级（world /collision latch）：平台上空下降被撞后回缓冲层重降
         rospy.Subscriber(ns + "/collision", Bool, self._on_collision)
+        # 诚实化 via_slots（2026-09-23）：cloud 模式下订阅本机点云累计占用格，
+        # 选槽净空只认自己看过的世界（真值 Scene 不参与）
+        if self._vs_enabled and self._vs_source == "cloud":
+            rospy.Subscriber(ns + "/cloud", PointCloud2, self._on_cloud,
+                             queue_size=2)
 
         self._publish_phase("IDLE")
         self.pub_crossed.publish(Bool(data=False))
@@ -573,12 +626,33 @@ class MissionExecutor:
         self.goal = xyz
         self.pub_goal.publish(g)
 
+    def _on_cloud(self, msg):
+        """诚实化 via_slots：本机点云 → 飞行带内占用格累计（0.5m 栅格）。
+
+        只收 map_z_band 内的观测点（杨树林冠下体制：带内=树干/邻机，冠与
+        地面在带外不污染）；栅格只增不减（障碍静态，邻机停留也会标记——
+        槽位避让邻机悬停区是特性非缺陷）。
+        """
+        try:
+            zlo, zhi = self._vs_zband
+            for p in pc2.read_points(msg, field_names=("x", "y", "z"),
+                                     skip_nans=True):
+                if zlo <= p[2] <= zhi:
+                    self._vs_obs_cells.add(
+                        (int(math.floor(p[0] / 0.5)),
+                         int(math.floor(p[1] / 0.5))))
+        except Exception:
+            pass
+
     def _pick_via_slot(self):
-        """W1 via_slots：本机越界槽位。槽位 y 升序 ↔ 名次一一对应（全局确定性：
-        各机本地对同一 Scene + 同一配置计算 → 同一槽位集，无需跨机通信）。
-        名次键：fallback=本机参考平台 drop_y 名次（旧行为）；闭环 RECON 模式
-        drop 未定 → 直接按 drone_id 对号。首次调用选定并缓存；选槽失败
-        （旗开但几何无解）返回 None，调用方回退共享越界点原行为。"""
+        """W1 via_slots：本机越界槽位。槽位 y 升序 ↔ 名次一一对应。
+        truth 模式：各机本地对同一 Scene + 同一配置计算 → 同一槽位集（全局
+        确定性，无需跨机通信）；cloud 模式（诚实化默认）：净空查本机点云
+        占用格，各机观测不同 → 槽位可不同，但 y 带归属仍按名次确定性对号，
+        带间不冲突。名次键：fallback=本机参考平台 drop_y 名次（旧行为）；
+        闭环 RECON 模式 drop 未定 → 直接按 drone_id 对号。首次调用选定并
+        缓存；选槽失败（旗开但几何无解）返回 None，调用方回退共享越界点
+        原行为。"""
         if self._vs_slot is not None:
             return self._vs_slot
         if self._cid_enabled or self.drop is None:
@@ -586,18 +660,23 @@ class MissionExecutor:
         else:
             keys = sorted((dp.xyz[1], dp.xyz[0]) for dp in self.scene.drop_points)
             rank = keys.index((self.drop[1], self.drop[0]))
+        obs = self._vs_obs_cells if self._vs_source == "cloud" else None
         slots = select_via_slots(self.scene, self.scene.drone_count,
                                  slot_clear=self._vs_clear, slot_sep=self._vs_sep,
                                  z_lo=self.cruise_z - 0.5, z_hi=self.cruise_z + 0.5,
-                                 zone_margin=self._vs_margin)
+                                 zone_margin=self._vs_margin,
+                                 obs_cells=obs, obs_cell=0.5)
         if slots is None or rank >= len(slots):
             rospy.logwarn("mission_executor_node: drone %d via_slots 无可行槽位集，"
                           "回退共享越界点", self.drone_id)
             return None
         slot = slots[rank]
         self._vs_slot = slot
-        rospy.loginfo("mission_executor_node: drone %d VIA-SLOT (%.2f,%.2f) clr=%.2f",
-                      self.drone_id, slot[0], slot[1], slot[2])
+        rospy.loginfo("mission_executor_node: drone %d VIA-SLOT (%.2f,%.2f) "
+                      "clr=%s obs_cells=%d src=%s",
+                      self.drone_id, slot[0], slot[1],
+                      ("unobs" if slot[2] >= 1e8 else "%.2f" % slot[2]),
+                      len(self._vs_obs_cells), self._vs_source)
         return slot
 
     def _scan_begin(self):
