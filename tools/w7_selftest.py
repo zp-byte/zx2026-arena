@@ -129,8 +129,8 @@ def t_settings():
     check("C6 C3 参数 react_t=0.41 margin=0.5 min_pts=2 cone=35",
           ts["react_t"] == 0.41 and ts["margin"] == 0.5
           and ts["min_pts"] == 2 and ts["cone_deg"] == 35)
-    check("C7 C3 z_band=[1.5,3.0]（含反应门盲区 2.5-3.0）",
-          ts["z_band"] == [1.5, 3.0])
+    check("C7 C3 z_band=[0.7,2.6]（杨树林冠下巡航带）",
+          ts["z_band"] == [0.70, 2.60])
     # 非默认值断言（mem6 教训）：翻旗后 yaml 侧读回翻转值——plumbing 双向可逆
     blob = io.open(CFG, encoding="utf-8").read()
     for key in ("post_hit_calm", "hazard_share"):

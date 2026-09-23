@@ -5,7 +5,10 @@
 arena_mission 共用同一份场景权威数据。
 """
 import math
+import os
 import random
+
+import yaml
 
 from zx2026_common import config as cfg
 from zx2026_common import geometry as geo
@@ -24,7 +27,8 @@ class Obstacle:
 
     __slots__ = ("lo", "hi", "kind", "id",
                  "cx", "cy", "trunk_r", "trunk_h", "crown_r", "crown_z",
-                 "branches")
+                 "crown_h", "branches",
+                 "mesh_variant", "mesh_scale", "mesh_yaw")
 
     def __init__(self, lo, hi, kind="tree", oid=0):
         self.lo = lo
@@ -38,7 +42,12 @@ class Obstacle:
         self.trunk_h = None
         self.crown_r = None
         self.crown_z = None
+        self.crown_h = None  # 冠包络高度（table 场景用；None=按球冠旧语义）
         self.branches = None  # 细枝列表 [(sx,sy,sz,ex,ey,ez,r),...]，真机场景建模
+        # 杨树林 mesh 视觉元数据（table 场景；world_builder 消费，None=旧圆柱树）
+        self.mesh_variant = None
+        self.mesh_scale = None
+        self.mesh_yaw = None
 
 
 class Zone:
@@ -149,6 +158,14 @@ class Scene:
                 return z["forest"].get("density_seed", 42)
         return 42
 
+    def _load_tree_table(self, rel):
+        """加载显式树表（相对 config 目录或绝对路径）。"""
+        path = rel if os.path.isabs(rel) else os.path.join(
+            cfg.pkg_config_dir(), rel)
+        with open(path, "r", encoding="utf-8") as fp:
+            data = yaml.safe_load(fp)
+        return data.get("trees", [])
+
     def _make_pads(self, zone):
         n = int(zone["pads"])
         sx, sy = zone["pad_spacing"]
@@ -228,6 +245,40 @@ class Scene:
                     self._decorate_tree(ob)
                     self.obstacles.append(ob)
                     oid += 1
+            return
+
+        if generator == "table":
+            # 显式树表：逐树 (x,y,trunk/crown 几何+mesh 视觉元数据)，坐标来自
+            # 外部场景转换（tools/import_poplar_sdf.py），不消耗森林 rng 流
+            # ——确定性天然成立，run_seed/density_seed 不再影响布局。
+            # 转换时已保证平台/起降净空，near_drop 仅作防御性兜底。
+            rows = self._load_tree_table(f.get("table_file", ""))
+            gz = self.venue["ground_z"]
+            for row in rows:
+                bx, by = float(row["x"]), float(row["y"])
+                if near_drop(bx, by):
+                    continue
+                r = float(row["trunk_r"])
+                h = float(row["trunk_h"])
+                lo = (bx - r, by - r, gz)
+                hi = (bx + r, by + r, gz + h)
+                ob = Obstacle(lo, hi, "tree", oid)
+                ob.cx = bx
+                ob.cy = by
+                ob.trunk_r = r
+                ob.trunk_h = h
+                ob.crown_r = float(row["crown_r"])
+                # 冠包络中心（外部场景的真实冠几何；旧语义球心=干顶）
+                ob.crown_z = (float(row["crown_z"]) if row.get("crown_z") is not None
+                              else gz + h)
+                ob.crown_h = (float(row["crown_h"]) if row.get("crown_h") is not None
+                              else None)
+                ob.mesh_variant = row.get("variant")
+                ob.mesh_scale = row.get("scale")
+                ob.mesh_yaw = row.get("yaw", 0.0)
+                self._decorate_tree(ob)
+                self.obstacles.append(ob)
+                oid += 1
             return
 
         # procedural 旧逻辑（保留可回退）

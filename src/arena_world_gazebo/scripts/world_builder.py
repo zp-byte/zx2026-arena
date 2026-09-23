@@ -19,6 +19,9 @@ from zx2026_common.scene import Scene
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "worlds", "forest_world.world")
 
+# 杨树林 mesh（table 场景视觉；STL 由 tools/import_poplar_sdf.py 配套拷入）
+MESH_URI = "file:///home/ubuntu/zx2026_arena_ws/src/arena_world_gazebo/meshes/poplar"
+
 # 平台色板（唯一色表；权威源=scene.color_map/dp.color 的颜色名，此处只做名字→RGB）
 PLATFORM_COLORS = {
     "red": (0.90, 0.20, 0.20),
@@ -86,6 +89,44 @@ def branch_links(ob):
   </link>""" % (k, mx, my, mz, pitch, yaw,
                col_geo(cyl), vis_geo(cyl, mat(0.45, 0.32, 0.18))))
     return links
+
+
+def tree_model_poplar(oid, ob):
+    """杨树（table 场景）：wood/leaves STL 视觉（与外部 SDF 同构）+ 树干/
+    冠包络两圆柱碰撞（=SDF c_trunk/c_crown 契约，gz 物理与 py Scene 一致）。
+
+    冠包络圆柱参与碰撞是杨树场景新增语义：冠下缘 ≥2.81m 在巡航带 (≤2.6)
+    之上，正常飞行永不接触；仅当异常爬升进冠区时由 gz 物理硬拦。
+    """
+    vi = ob.mesh_variant
+    s = ob.mesh_scale or 1.0
+    mesh = lambda part: ('<mesh><uri>%s/tree_%d_%s.stl</uri>'
+                         '<scale>%.3f %.3f %.3f</scale></mesh>'
+                         % (MESH_URI, vi, part, s, s, s))
+    trunk_col = ('<collision name="c_trunk"><pose>0 0 %.3f 0 0 0</pose>'
+                 '<geometry><cylinder><radius>%.3f</radius><length>%.3f'
+                 '</length></cylinder></geometry></collision>'
+                 % (ob.trunk_h / 2.0, ob.trunk_r, ob.trunk_h))
+    crown_h = ob.crown_h if ob.crown_h else 0.64 * ob.trunk_h / 0.78
+    crown_col = ('<collision name="c_crown"><pose>0 0 %.3f 0 0 0</pose>'
+                 '<geometry><cylinder><radius>%.3f</radius><length>%.3f'
+                 '</length></cylinder></geometry></collision>'
+                 % (ob.crown_z, ob.crown_r, crown_h))
+    wood_vis = ('<visual name="v_wood"><geometry>%s</geometry>%s</visual>'
+                % (mesh("wood"), mat(0.45, 0.31, 0.19)))
+    leaf_vis = ('<visual name="v_leaf"><geometry>%s</geometry>%s</visual>'
+                % (mesh("leaves"), mat(0.22, 0.47, 0.16)))
+    return """<model name="tree_%d">
+  <static>true</static>
+  <pose>%.3f %.3f 0 0 0 %.3f</pose>
+  <link name="tree">
+    %s
+    %s
+    %s
+    %s
+  </link>
+</model>""" % (oid, ob.cx, ob.cy, ob.mesh_yaw or 0.0,
+               wood_vis, leaf_vis, trunk_col, crown_col)
 
 
 def tree_model(oid, ob):
@@ -255,87 +296,42 @@ def ground_plane_model(size_x, size_y, color=(0.42, 0.56, 0.32)):
 
 
 def court_models():
-    """主场地：沥青面 + 白色边线 + 路缘石。"""
+    """起降清理带：土面（x∈[-30,-24] 清理带，取代旧沥青球场）。"""
     models = []
-    # 34 × 26 沥青面（厚 0.02）
-    models.append(thin_box_model("court_asphalt", 0, 0, 0.0, 34, 26, 0.02,
-                                 (0.34, 0.35, 0.36)))
-    # 四条白色边线（内缩 0.5m，高 0.02，宽 0.22）
-    e_x = 34 / 2 - 0.5
-    e_y = 26 / 2 - 0.5
-    line_h = 0.03
-    line_w = 0.22
-    models.append(thin_box_model("line_n", 0,  e_y, line_h / 2, 34 - 1.0, line_w, line_h,
-                                 (0.95, 0.95, 0.95)))
-    models.append(thin_box_model("line_s", 0, -e_y, line_h / 2, 34 - 1.0, line_w, line_h,
-                                 (0.95, 0.95, 0.95)))
-    models.append(thin_box_model("line_w", -e_x, 0, line_h / 2, line_w, 26 - 1.0, line_h,
-                                 (0.95, 0.95, 0.95)))
-    models.append(thin_box_model("line_e",  e_x, 0, line_h / 2, line_w, 26 - 1.0, line_h,
-                                 (0.95, 0.95, 0.95)))
-    # 路缘石（高 0.32，厚 0.5，沿场地外圈）
-    curb_h = 0.32
-    curb_t = 0.5
-    cx = 34 / 2 + curb_t / 2
-    cy = 26 / 2 + curb_t / 2
-    models.append(thin_box_model("curb_n", 0,  cy, 0.0, 34 + curb_t, curb_t, curb_h,
-                                 (0.73, 0.71, 0.67)))
-    models.append(thin_box_model("curb_s", 0, -cy, 0.0, 34 + curb_t, curb_t, curb_h,
-                                 (0.73, 0.71, 0.67)))
-    models.append(thin_box_model("curb_w", -cx, 0, 0.0, curb_t, 26 + curb_t, curb_h,
-                                 (0.73, 0.71, 0.67)))
-    models.append(thin_box_model("curb_e",  cx, 0, 0.0, curb_t, 26 + curb_t, curb_h,
-                                 (0.73, 0.71, 0.67)))
+    models.append(thin_box_model("clearing_dirt", -27, 0, 0.0, 6.2, 60.4, 0.02,
+                                 (0.60, 0.52, 0.36)))
     return models
 
 
 def takeoff_pad_model():
-    """左侧起降区：水泥垫 + 黄色标识带。"""
+    """起降区：水泥垫 + 黄色标识带（pads x=-27.75~-24.75, y=±3.75）。"""
     models = []
-    models.append(thin_box_model("takeoff_pad", -23, 9, 0.02, 8, 6.5, 0.02,
+    models.append(thin_box_model("takeoff_pad", -27, 0, 0.02, 5.6, 11.0, 0.02,
                                  (0.73, 0.71, 0.67)))
-    models.append(thin_box_model("takeoff_band", -23, 9 + 6.5 / 2 - 0.5, 0.05, 8, 1.0, 0.02,
+    models.append(thin_box_model("takeoff_band", -27, 0, 0.05, 5.6, 1.0, 0.02,
                                  (0.94, 0.75, 0.25)))
     return models
 
 
 def crossing_zone_models():
-    """穿越区：橙色透明面 + 棕色边框。"""
+    """穿越区：橙色透明面 + 棕色边框（林带 52×56，中心 (2,0)）。"""
     models = []
-    # 中心 (1,2), 12 × 8
-    models.append(thin_box_model("crossing_zone", 1, 2, 0.04, 12, 8, 0.02,
+    models.append(thin_box_model("crossing_zone", 2, 0, 0.04, 52, 56, 0.02,
                                  (0.85, 0.48, 0.31), alpha=0.5))
-    # 边框
-    border_h = 0.04
-    border_w = 0.18
-    hx, hy = 6, 4
-    models.append(thin_box_model("cz_border_n", 1, 2 + hy - border_w / 2, border_h / 2,
-                                 12, border_w, border_h, (0.54, 0.29, 0.16)))
-    models.append(thin_box_model("cz_border_s", 1, 2 - hy + border_w / 2, border_h / 2,
-                                 12, border_w, border_h, (0.54, 0.29, 0.16)))
-    models.append(thin_box_model("cz_border_w", 1 - hx + border_w / 2, 2, border_h / 2,
-                                 border_w, 8, border_h, (0.54, 0.29, 0.16)))
-    models.append(thin_box_model("cz_border_e", 1 + hx - border_w / 2, 2, border_h / 2,
-                                 border_w, 8, border_h, (0.54, 0.29, 0.16)))
     return models
 
 
 def fence_models():
-    """场地外围围栏（与 scene_topology.yaml static_obstacles fence AABB 对齐）。
-
-    修复历史失和：fence_e 原 18.6 vs yaml 22.50~22.80（中心 22.65）、
-    N/S 长度 37.2 vs yaml 41.4（x -18.60~22.80，中心 2.10）。
-    """
+    """场地外围围栏（与 scene_topology.yaml static_obstacles fence AABB 对齐）：
+    ±30 墙线、高 2.80（冠下体制真实侧墙；2.80 > 点云带上限 2.60）。"""
     models = []
-    # x 方向两侧（y 跨 -15.5~15.5，长 31）
-    models.append(thin_box_model("fence_w", -18.60, 0, 0.0, 0.3, 31.0, 1.3,
+    models.append(thin_box_model("fence_w", -30.15, 0, 0.0, 0.3, 60.9, 2.8,
                                  (0.31, 0.42, 0.27)))
-    models.append(thin_box_model("fence_e",  22.65, 0, 0.0, 0.3, 31.0, 1.3,
+    models.append(thin_box_model("fence_e",  30.15, 0, 0.0, 0.3, 60.9, 2.8,
                                  (0.31, 0.42, 0.27)))
-    # y 方向两侧（x 跨 -18.6~22.8，长 41.4，中心 2.1）
-    models.append(thin_box_model("fence_n", 2.1,  15.5, 0.0, 41.4, 0.3, 1.3,
+    models.append(thin_box_model("fence_n", 0,  30.15, 0.0, 60.9, 0.3, 2.8,
                                  (0.31, 0.42, 0.27)))
-    models.append(thin_box_model("fence_s", 2.1, -15.5, 0.0, 41.4, 0.3, 1.3,
+    models.append(thin_box_model("fence_s", 0, -30.15, 0.0, 60.9, 0.3, 2.8,
                                  (0.31, 0.42, 0.27)))
     return models
 
@@ -367,11 +363,14 @@ def build():
     out.extend(crossing_zone_models())
     out.extend(fence_models())
 
-    # 树/灌木
+    # 树/灌木（table 场景=杨树 mesh 视觉；旧场景=圆柱树）
     n_tree = n_bush = 0
     for ob in scene.obstacles:
         if ob.kind == "tree":
-            out.append(tree_model(ob.id, ob))
+            if ob.mesh_variant is not None:
+                out.append(tree_model_poplar(ob.id, ob))
+            else:
+                out.append(tree_model(ob.id, ob))
             n_tree += 1
         elif ob.kind == "bush":
             out.append(bush_model(ob.id, ob.lo, ob.hi))
