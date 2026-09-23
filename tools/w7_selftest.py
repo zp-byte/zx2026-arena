@@ -152,6 +152,8 @@ def t_settings():
     rules = yaml.safe_load(io.open(rules_p, encoding="utf-8"))
     check("C11 color_id source=camera（识别诚实化，truth=god 臂）",
           (rules.get("color_id", {}) or {}).get("source") == "camera")
+    check("C12 flight_z_ceiling=4.5（行为封顶，距 OVER_HEIGHT 5.0 保 0.5m）",
+          (rules.get("heights", {}) or {}).get("flight_z_ceiling") == 4.5)
 
 
 def t_hazard():

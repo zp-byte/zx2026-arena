@@ -174,6 +174,10 @@ class NavNode:
         self.max_vel = float(rules["motion"].get("default_max_vel", 2.0))
         self.max_acc = float(rules["motion"].get("default_max_acc", 4.0))
         self.cruise_z = float(rules["heights"].get("cruise_z", 2.5))
+        # 行为封顶（用户裁决 2026-09-23）：goal z 钳位上限，距 OVER_HEIGHT
+        # 5.0 保 0.5m 余量；0=不钳（向后兼容旧场景）。证据窗 map_z_band
+        # 与本参数无关（挡冠点反幻影墙，勿混用——见 rules heights 注释）
+        self._z_ceiling = float(rules["heights"].get("flight_z_ceiling", 0.0))
         # Scene 仅用于取物理常量（drone_radius/venue/drone_count），不作占用感知
         self.scene = Scene()
         settings = cfg.load("sim_settings.yaml")
@@ -654,9 +658,16 @@ class NavNode:
 
     def _on_goal(self, msg):
         p = msg.pose.position
-        self.goal = (p.x, p.y, p.z)
+        gz = p.z
+        # 行为封顶钳位（flight_z_ceiling，0=不钳）：钳位必留 warn 痕
+        # （诚实化纪律：静默改写指令=新的不可见真值泄漏面）
+        if self._z_ceiling > 0 and gz > self._z_ceiling:
+            rospy.logwarn("drone %d goal z %.2f clamped to flight_z_ceiling %.2f",
+                          self.drone_id, gz, self._z_ceiling)
+            gz = self._z_ceiling
+        self.goal = (p.x, p.y, gz)
         rospy.loginfo("nav_node: drone %d new goal (%.1f, %.1f, %.1f)",
-                      self.drone_id, p.x, p.y, p.z)
+                      self.drone_id, p.x, p.y, gz)
         if self.closed_loop and self.tc_enabled:
             self._path_force = True   # 粘滞模式下立即重选路径奔新 goal
         self._replan()
