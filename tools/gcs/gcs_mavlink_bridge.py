@@ -238,6 +238,12 @@ class Bridge(object):
                 self.mav.mav.command_long_send(
                     sysid, 1, mav.MAV_CMD_NAV_LAND, 0,
                     0, 0, 0, 0, 0, 0, 0)
+            elif cmd == "takeoff":
+                # param7=目标高度(m, 相对起飞点)；deploy 进场段贫机起飞
+                z = float(c.get("z") or 2.5)
+                self.mav.mav.command_long_send(
+                    sysid, 1, mav.MAV_CMD_NAV_TAKEOFF, 0,
+                    0, 0, 0, 0, 0, 0, z)
             elif cmd == "rtl":
                 self.mav.mav.command_long_send(
                     sysid, 1, mav.MAV_CMD_NAV_RETURN_TO_LAUNCH, 0,

@@ -1,4 +1,4 @@
-# panic 双轨 E2E 测试 profile（勿用于实机）：
+# 闸门/双轨 E2E 测试 profile（勿用于实机）：
 # d0=富机走模板（"true"=假 ssh，rc=0）；d1=贫机走 ops.mavlink（bridge 命令口）
 mode: real
 ids: [0, 1]
@@ -8,5 +8,11 @@ ops:
   mavlink:
     cmd_addr: 127.0.0.1:9871
     ids: [1]
+    cruise_z: 2.0
+    takeoff_z: 2.5
+    missions:
+      1: [[1.5, 0.5, 2.0], [3.0, 1.0, 2.0]]   # deploy 静态指派（2 航点）
   cmds:
     land: "true"
+    takeoff: "true"    # recon 强机起飞假模板（rc=0）
+    trigger: "true"    # recon 全局触发假模板（rc=0）

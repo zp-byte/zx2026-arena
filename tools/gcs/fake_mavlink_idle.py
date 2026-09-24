@@ -19,7 +19,7 @@ def idle_px4(sysid, connect):
                                    source_component=1)
     mav = m.mav      # 协议对象（send 方法）
     en = mavutil.mavlink  # 枚举常量住 dialects 模块
-    names = {20: "RTL", 21: "LAND"}
+    names = {20: "RTL", 21: "LAND", 22: "TAKEOFF"}
     t0 = time.time()
     while True:
         t = time.time() - t0

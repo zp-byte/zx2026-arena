@@ -64,6 +64,13 @@ ops:
   mavlink:
     cmd_addr: 127.0.0.1:9871    # bridge 命令口（bridge 跑在地面站本机）
     ids: []                     # TODO(联调日) 按编队填贫机 did，如 [1, 2, 3]
+    cruise_z: 2.0               # 贫机任务平飞高(m, RELATIVE_ALT=ENU u 同口径)
+    takeoff_z: 2.5              # 贫机起飞目标高(m)——deploy 进场段用
+    missions: {}                # 贫机静态指派 did -> [[e,n,z],...]（ENU 米）；
+                                #   赛前三投放点 GPS→ENU 换算后填；CLI 覆盖用
+                                #   `deploy --wps "e,n,z;..." --ids <贫机>`。
+                                #   阶段闸门：recon(强机侦察)→gate(覆盖率/
+                                #   人工放行)→deploy(贫机 mission+takeoff)
 
   # 真机调试接口（面板 DEBUG 窗 / `ops debug <名> [args]`）——约定只读，
   # 写操作一律走上面 cmds（两段确认）。{args}=参数槽。

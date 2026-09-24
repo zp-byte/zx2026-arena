@@ -33,6 +33,7 @@ mode: real 的附加保护：
   python3 gcs_ops.py --profile profile_real_lio.yaml panic
 """
 import argparse
+import base64
 import glob
 import json
 import math
@@ -103,8 +104,12 @@ class Ops(object):
         # 口的贫机 did（机载零代码、无 ssh 通道），land/back 经 MAVLink 下
         # 发；其余机走 ops.cmds 模板（ssh）。两轨 per-drone 混跑。
         ml = ops.get("mavlink", {}) or {}
+        self.ml = ml
         self.ml_addr = ml.get("cmd_addr")     # bridge cmd 口 "host:port"
         self.ml_ids = set(str(s) for s in (ml.get("ids") or []))
+        # YAML missions: {1: [...]} 键是 int——统一 str 归一（did 全程 str）
+        self.ml_missions = {str(k): v for k, v in
+                            (ml.get("missions") or {}).items()}
 
     # ---- 日志与快照 --------------------------------------------------------
     def log(self, kind, **kw):
@@ -159,11 +164,15 @@ class Ops(object):
                    if (drones.get(i) or {}).get("connected") is not True]
             res["FC"] = (not bad, "mavros ok" if not bad
                          else "fc not connected: %s" % ",".join(bad))
-        # AUTONOMY：自主栈活着
+        # AUTONOMY：自主栈活着（P1 贫机 liveness 换源：机载零代码无 plan
+        # 流——自主态判据=FC 主模式在 AUTO/OFFBOARD（bridge PX4 解码 4/6））
         bad = []
         for i in self.ids:
             d = drones.get(i) or {}
-            if self.autonomy_mode == "plan":
+            if i in self.ml_ids:
+                if d.get("fc") not in ("AUTO", "OFFBOARD"):
+                    bad.append("%s fc=%s" % (i, d.get("fc") or "--"))
+            elif self.autonomy_mode == "plan":
                 pa = d.get("plan_age")
                 if pa is None or pa < 0 or pa > self.plan_dead_s:
                     bad.append("%s plan_age=%s" % (i, pa))
@@ -360,22 +369,27 @@ class Ops(object):
         return [i for i in self.ids
                 if (self._z_of(drones, i) or -1e9) >= self.airborne_z]
 
-    def wait_airborne(self):
-        """全部机 z >= airborne_z 才算离地；超时=失败（宁可不起飞）。"""
+    def wait_airborne(self, ids=None):
+        """ids（缺省全队）全部 z >= airborne_z 才算离地；超时=失败。
+
+        recon 传 rich——侦察段只放强机，贫机在地面不该卡离地确认。
+        """
+        ids = ids if ids is not None else self.ids
         print(" airborne confirm: z >= %.1fm, timeout %.0fs"
               % (self.airborne_z, self.airborne_timeout_s))
         t0 = time.time()
         while True:
             drones = (self.read_status() or {}).get("drones", {})
-            up = self._airborne_ids(drones)
+            up = [i for i in ids
+                  if (self._z_of(drones, i) or -1e9) >= self.airborne_z]
             ph = " ".join("%s:%s" % (i, "%.1f" % self._z_of(drones, i)
                                      if self._z_of(drones, i) is not None
                                      else "--")
-                          for i in self.ids)
+                          for i in ids)
             print("  [%3.0fs] z %s (%d/%d up)"
-                  % (time.time() - t0, ph, len(up), len(self.ids)))
-            if len(up) == len(self.ids):
-                print(" AIRBORNE — all %d drones up." % len(self.ids))
+                  % (time.time() - t0, ph, len(up), len(ids)))
+            if len(up) == len(ids):
+                print(" AIRBORNE — all %d drones up." % len(ids))
                 self.log("AIRBORNE_OK")
                 return True
             if time.time() - t0 > self.airborne_timeout_s:
@@ -519,6 +533,136 @@ class Ops(object):
         self.print_table(snap, res, cur)
         return 0
 
+    # ---- P1 阶段闸门（侦察→放行门→进场） -----------------------------------
+    def _rich_ids(self):
+        return [i for i in self.ids if i not in self.ml_ids]
+
+    @staticmethod
+    def _rle_decode(s):
+        raw = base64.b64decode(s)
+        out = []
+        for k in range(0, len(raw), 2):
+            out.extend([raw[k]] * raw[k + 1])
+        return out
+
+    def recon(self):
+        """侦察段：只放飞强机（建图侦察），贫机地面待命。"""
+        rich = self._rich_ids()
+        if not rich:
+            print(" no rich drones (all in ops.mavlink.ids?) — nothing to "
+                  "recon.")
+            return 2
+        print(" RECON — 强机 d%s 起飞+侦察，贫机地面待命"
+              % ",".join(rich))
+        self.log("RECON", rich=rich)
+        if not self.dispatch("takeoff", ids=rich):
+            print(" takeoff dispatch failed — recon aborted.")
+            self.log("TAKEOFF_FAIL")
+            return 1
+        if not self.wait_airborne(ids=rich):
+            up = self._airborne_ids()
+            if up:
+                print(" airborne confirm FAILED — 已离地 d%s land 回滚"
+                      % ",".join(up))
+                self.log("AIRBORNE_ROLLBACK", up=up)
+                self.dispatch("land", ids=up)
+            return 1
+        tmpl = self.cmds.get("trigger")
+        if tmpl is None:
+            print(" trigger not configured — assume auto-start recon.")
+            self.log("TRIGGER_SKIP")
+        elif "{id}" in tmpl:
+            if not self.dispatch("trigger", ids=rich):
+                print(" trigger failed — recon NOT started.")
+                self.log("TRIGGER_FAIL")
+                return 1
+        else:
+            # 全局模板=一次广播语义（逐机 dispatch 会重复触发）
+            rc, out, err = self._run(tmpl)
+            self.log("CMD", action="trigger", rc=rc, out=out.strip()[:200])
+            if rc != 0:
+                print(" trigger failed (%d) — recon NOT started."
+                      % rc)
+                self.log("TRIGGER_FAIL")
+                return 1
+        print(" RECON started — MAP 窗盯建图；够图后 `gate` 放行 → "
+              "`deploy` 进场。")
+        return 0
+
+    def gate(self, auto_cover, yes):
+        """放行门：强机建图已扫覆盖率（grids 非未知格占比）判据/人工放行。"""
+        snap = self.read_status() or {}
+        grids = snap.get("grids") or {}
+        rows = []
+        cover = 0.0
+        for i in self._rich_ids():
+            g = grids.get(i)
+            if not g:
+                rows.append("d%s no-grid" % i)
+                continue
+            vals = self._rle_decode(g["rle"])
+            total = g["w"] * g["h"]
+            known = sum(1 for v in vals if v != 2)
+            cover = known / float(total) if total else 0.0
+            rows.append("d%s known=%d/%d(%.0f%%)"
+                        % (i, known, total, cover * 100))
+        print(" GATE — %s" % "; ".join(rows) or "no rich drones")
+        self.log("GATE_CHECK", cover=round(cover, 3),
+                 auto=bool(grids) and bool(self._rich_ids()))
+        if auto_cover is not None:
+            if grids and cover >= auto_cover:
+                print(" AUTO GATE PASS — cover %.0f%% >= %.0f%%"
+                      % (cover * 100, auto_cover * 100))
+                self.log("GATE_PASS", cover=round(cover, 3))
+                return 0
+            print(" AUTO GATE HOLD — cover %.0f%% < %.0f%%（继续侦察）"
+                  % (cover * 100, auto_cover * 100))
+            self.log("GATE_HOLD", cover=round(cover, 3))
+            return 1
+        if yes:
+            print(" GATE OPENED (人工放行).")
+            self.log("GATE_OPEN")
+            return 0
+        print(" 人工放行须显式 --yes（看 MAP 窗后确认）；或 "
+              "--auto-cover X 走覆盖率自动判据")
+        return 2
+
+    def deploy(self, wps_map, yes):
+        """进场段：贫机 mission 下发+takeoff（MAVLink 全轨，桥接 cmd 口）。"""
+        poor = [i for i in self.ids if i in self.ml_ids]
+        if not poor:
+            print(" no poor drones in ops.mavlink.ids — nothing to deploy.")
+            return 2
+        if self.mode == "real" and not yes:
+            print(" REFUSED: real 模式 `deploy` 须 --yes（起飞+装订任务）")
+            return 2
+        missions_cfg = self.ml_missions
+        takeoff_z = float(self.ml.get("takeoff_z", 2.5))
+        all_ok = True
+        for n, did in enumerate(poor):
+            if n:
+                time.sleep(self.stagger_s)
+            wps = wps_map.get(did) or missions_cfg.get(did)
+            if not wps:
+                print("  d%s no wps (CLI/profile 均无) — skip" % did)
+                all_ok = False
+                continue
+            wps = [[float(c) for c in w] for w in wps]
+            ok, ret = self._ml_cmd("upload_mission", did, {"wps": wps})
+            self.log("DEPLOY", drone=did, step="mission", ok=ok, ret=ret)
+            print("  d%s mission %s (%d wps)" % (did, ret, len(wps)))
+            if not ok:
+                all_ok = False
+                continue
+            ok2, ret2 = self._ml_cmd("takeoff", did, {"z": takeoff_z})
+            self.log("DEPLOY", drone=did, step="takeoff", ok=ok2, ret=ret2)
+            print("  d%s takeoff %s (z=%.1f)" % (did, ret2, takeoff_z))
+            all_ok = all_ok and ok2
+        print(" DEPLOY %s — %d 贫机" % ("OK" if all_ok else "INCOMPLETE",
+                                       len(poor)))
+        self.log("DEPLOY_END", ok=all_ok)
+        return 0 if all_ok else 1
+
     # ---- 真机调试接口（ssh）-------------------------------------------------
     def debug_cli(self, name, cmd_args, ids=None):
         """ops debug <名> [args]：跑 profile ops.debug_cmds 里的命名 ssh 命令。
@@ -621,12 +765,19 @@ def main():
     ap.add_argument("--profile", required=True)
     ap.add_argument("action",
                     choices=["status", "preflight", "start", "takeoff",
-                             "back", "land", "panic", "debug", "export"])
+                             "back", "land", "panic", "debug", "export",
+                             "recon", "gate", "deploy"])
     ap.add_argument("debug_name", nargs="?", default=None,
                     help="debug 子命令名（无参=list 可用命令）")
     ap.add_argument("debug_args", nargs="?", default=None,
                     help="debug 命令的 {args} 参数")
     ap.add_argument("--ids", default=None, help="逗号分隔，缺省=全队")
+    ap.add_argument("--auto-cover", type=float, default=None,
+                    help="gate 自动判据：已扫覆盖率阈值(0-1)；缺省=人工 --yes")
+    ap.add_argument("--wps", default=None,
+                    help='deploy 航点 "e,n,z;e,n,z"（ENU 米，配 --ids 单机）')
+    ap.add_argument("--wps-file", default=None,
+                    help="deploy 航点文件 JSON {did: [[e,n,z],...]}")
     ap.add_argument("--out", default=None,
                     help="export 输出路径（缺省 run_logs/gcs_export_<ts>.tar.gz）")
     ap.add_argument("--force", action="store_true")
@@ -637,7 +788,7 @@ def main():
     args = ap.parse_args()
     ops = Ops(args.profile)
     # real 模式保护：危险命令必须 --yes；panic 豁免（急停不设障碍）
-    REAL_DANGER = {"start", "takeoff", "back", "land"}
+    REAL_DANGER = {"start", "takeoff", "back", "land", "deploy"}
     if ops.mode == "real":
         print("== REAL MODE (真机) profile=%s ==" % args.profile)
         if args.action in REAL_DANGER and not args.yes:
@@ -680,6 +831,21 @@ def main():
                   % (len(ids), len(ids)))
             ops.log("PANIC_COMPLETE", ids=ids)
         raise SystemExit(0 if ok else 1)
+    if args.action == "recon":
+        raise SystemExit(ops.recon())
+    if args.action == "gate":
+        raise SystemExit(ops.gate(args.auto_cover, args.yes))
+    if args.action == "deploy":
+        wps_map = {}
+        if args.wps_file:
+            with open(args.wps_file, encoding="utf-8") as f:
+                wps_map = json.load(f)
+        if args.wps:
+            wps = [[float(c) for c in w.split(",")]
+                   for w in args.wps.split(";")]
+            for i in (args.ids.split(",") if args.ids else ops.ids):
+                wps_map[str(i)] = wps
+        raise SystemExit(ops.deploy(wps_map, args.yes))
     if args.action == "preflight":
         raise SystemExit(ops.preflight(args.preflight_timeout))
     if args.action == "start":

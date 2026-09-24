@@ -35,6 +35,7 @@ class Agent(object):
         self.lock = threading.Lock()
         self.state = {i: self._blank() for i in self.ids}
         self.grids = {}    # did -> RLE 压缩占用栅格（第 4 步 ③：建图上屏）
+        self.grid_acc = {}  # did -> {(gx,gy):1} 世界格键累积（P1 帧间 OR 合并）
         self.scores = {}   # did -> 比分明细（scorekeeper /zx2026/score/<id>）
         self.missions = {}  # did -> 任务指派（/zx2026/mission/<id>）
         self.tasks = {}    # did -> 任务进度事件（/zx2026/task_update，LANDED/RETIRED）
@@ -305,40 +306,58 @@ class Agent(object):
             self.grids[i] = g
 
     def _on_grid_cloud(self, msg, i):
-        """FR-1.4 真机建图：PointCloud2 → x-y 投影 → 0.5m 栅格 → RLE。
+        """FR-1.4 真机建图（P1 累积版）：PointCloud2 → x-y 投影 → 帧间
+        OR 合并 → 0.5m 栅格 → RLE。
 
-        真机 LIO/VIO 累积点云→2D 占用栅格，与 sim OccupancyGrid 同格式输出，
-        面板地图窗零改动。z 过滤 [0.3, 4.0] 取地面以上树冠以下点。
+        侦察建图语义=累积全场（单帧投影只见当前扫描窗，MAP 窗会闪没）；
+        LIO 漂移在比赛 10min 尺度内不纠（展示用途，诚实口径：MAP 窗
+        ≈LIO 累积图）。sim OccupancyGrid 路径（_on_grid）不动。
         """
         try:
             from sensor_msgs import point_cloud2
             pts = list(point_cloud2.read_points(
                 msg, field_names=("x", "y", "z"), skip_nans=True))
-            pts = [p for p in pts if 0.3 <= p[2] <= 4.0]
-            if not pts:
+            cells = self._cloud_cells(pts)
+            if not cells:
                 return
-            res = 0.5
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            x0 = math.floor(min(xs) / res) * res
-            y0 = math.floor(min(ys) / res) * res
-            w = int(math.ceil((max(xs) - x0) / res)) + 1
-            h = int(math.ceil((max(ys) - y0) / res)) + 1
-            if w <= 0 or h <= 0 or w * h > 4000000:
-                return
-            # 栅格化：有点的格=占用(1)，无点=未知(2)
-            cells = [2] * (w * h)
-            for p in pts:
-                cx = int((p[0] - x0) / res)
-                cy = int((p[1] - y0) / res)
-                if 0 <= cx < w and 0 <= cy < h:
-                    cells[(h - 1 - cy) * w + cx] = 1  # 行翻转：原点左下
-            g = {"w": w, "h": h, "res": res, "x0": x0, "y0": y0,
-                 "rle": self._rle_encode(cells)}
+            with self.lock:
+                acc = self.grid_acc.setdefault(i, {})
+                acc.update({k: 1 for k in cells})
+                self.grids[i] = self._acc_grid(acc)
         except Exception:
             return
-        with self.lock:
-            self.grids[i] = g
+
+    # 累积栅格参数（类常量：纯逻辑 classmethod 可离线直测，不碰 ROS）
+    GRID_RES = 0.5       # m，MAP 窗栅格分辨率（与 sim OccupancyGrid 同口径）
+    GRID_Z = (0.3, 4.0)  # z 带：地面回波以下、树冠以上
+
+    @classmethod
+    def _cloud_cells(cls, pts):
+        """点列 → 世界坐标占用格键集合（z 带内；纯逻辑可离线测）。"""
+        zlo, zhi = cls.GRID_Z
+        res = cls.GRID_RES
+        return {(int(math.floor(x / res)), int(math.floor(y / res)))
+                for (x, y, z) in pts if zlo <= z <= zhi}
+
+    @classmethod
+    def _acc_grid(cls, acc):
+        """累积格键 dict → RLE 栅格 dict（行翻转原点左下；空=None）。"""
+        if not acc:
+            return None
+        res = cls.GRID_RES
+        gxs = [k[0] for k in acc]
+        gys = [k[1] for k in acc]
+        gx0, gy0 = min(gxs), min(gys)
+        w = max(gxs) - gx0 + 1
+        h = max(gys) - gy0 + 1
+        if w * h > 4000000:
+            return None
+        cells = [2] * (w * h)          # 无点=未知(2)，有点=占用(1)
+        for (gx, gy) in acc:
+            cells[(h - 1 - (gy - gy0)) * w + (gx - gx0)] = 1
+        return {"w": w, "h": h, "res": res,
+                "x0": gx0 * res, "y0": gy0 * res,
+                "rle": Agent._rle_encode(cells)}
 
     # ---- TCP 发送（client 主动连地面站，断线重连，只发最新快照） ----------
     def spin_sender(self):
