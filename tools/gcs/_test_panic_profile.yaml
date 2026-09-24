@@ -1,0 +1,12 @@
+# panic 双轨 E2E 测试 profile（勿用于实机）：
+# d0=富机走模板（"true"=假 ssh，rc=0）；d1=贫机走 ops.mavlink（bridge 命令口）
+mode: real
+ids: [0, 1]
+ops:
+  status_file: /tmp/gcs_ml_status.json
+  logdir: /tmp
+  mavlink:
+    cmd_addr: 127.0.0.1:9871
+    ids: [1]
+  cmds:
+    land: "true"

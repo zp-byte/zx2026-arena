@@ -38,6 +38,7 @@ import json
 import math
 import os
 import shlex
+import socket
 import subprocess
 import tarfile
 import time
@@ -52,6 +53,11 @@ STAGES_REAL = ["PREFLIGHT", "POSITIONING", "POWER", "FC", "AUTONOMY",
 
 
 class Ops(object):
+    # 贫机轨命令映射：ops action -> bridge cmd（MAVLink）；
+    # panic 同模板链 panic→land 的降级语义（急停=立即降落）
+    ML_CMD = {"land": "land", "back": "rtl", "rtl": "rtl",
+              "panic": "land"}
+
     def __init__(self, profile_path):
         with open(profile_path, encoding="utf-8") as f:
             self.cfg = yaml.safe_load(f)
@@ -93,6 +99,12 @@ class Ops(object):
             logdir, time.strftime("%Y%m%d_%H%M%S"))
         self.logf = open(self.logpath, "a", encoding="utf-8")
         self.stage_topic = (self.cfg.get("topics", {}) or {}).get("stage")
+        # 贫机 MAVLink 轨（P0-② panic 双轨化）：mavlink.ids=走 bridge 命令
+        # 口的贫机 did（机载零代码、无 ssh 通道），land/back 经 MAVLink 下
+        # 发；其余机走 ops.cmds 模板（ssh）。两轨 per-drone 混跑。
+        ml = ops.get("mavlink", {}) or {}
+        self.ml_addr = ml.get("cmd_addr")     # bridge cmd 口 "host:port"
+        self.ml_ids = set(str(s) for s in (ml.get("ids") or []))
 
     # ---- 日志与快照 --------------------------------------------------------
     def log(self, kind, **kw):
@@ -235,6 +247,36 @@ class Ops(object):
         except Exception as e:
             return -1, "", str(e)
 
+    def _ml_cmd(self, cmd, did, extra=None, timeout=8.0):
+        """贫机命令经 bridge cmd 口（TCP JSON 行）下发，返回 (ok, ret)。
+
+        ok 判定=bridge 回 ret 以 ok/pong 开头；超时/断连/未知 did 全算
+        失败并由调用方重试（急停链路宁可重发，不做静默吞）。
+        """
+        if not self.ml_addr:
+            return False, "no-mavlink-cfg"
+        host, _, port = self.ml_addr.rpartition(":")
+        obj = {"cmd": cmd, "did": str(did)}
+        if extra:
+            obj.update(extra)
+        try:
+            s = socket.create_connection((host, int(port)), timeout=timeout)
+            s.sendall((json.dumps(obj) + "\n").encode("ascii"))
+            buf = b""
+            t0 = time.time()
+            while b"\n" not in buf and time.time() - t0 < timeout:
+                chunk = s.recv(256)
+                if not chunk:
+                    break
+                buf += chunk
+            s.close()
+            line = buf.decode("ascii", "replace").strip()
+            ret = "no-resp" if not line else str(
+                json.loads(line.splitlines()[0]).get("ret", ""))
+            return ret.startswith("ok") or ret == "pong", ret
+        except Exception as e:
+            return False, str(e)[:80]
+
     def dispatch(self, action, ids=None):
         """模板含 {id}=逐机错峰+重试；不含=全局一次。返回全成与否。
 
@@ -246,12 +288,16 @@ class Ops(object):
         tmpl = self.cmds.get(action)
         if tmpl is None and action == "panic":
             tmpl = self.cmds.get("land")  # panic 走 panic→land 模板链
-        if tmpl is None:
+        ml_map = self.ML_CMD.get(action)
+        use_ids = ids if ids is not None else self.ids
+        if tmpl is None and not (ml_map and self.ml_ids):
             print(" [%s] not configured in this profile (sim: "
-                  "stage_controller auto-drives; real: fill ops.cmds.%s)"
-                  % (action, action))
+                  "stage_controller auto-drives; real: fill ops.cmds.%s"
+                  " / ops.mavlink)" % (action, action))
             return False
-        if "{id}" not in tmpl:
+        # 全局模板路径仅当无贫机参与（贫机须逐机定向；混队一律逐机混轨）
+        if tmpl is not None and "{id}" not in tmpl and not any(
+                i in self.ml_ids for i in use_ids):
             rc, out, err = self._run(tmpl)
             ok = rc == 0
             self.last_results = [(None, ok)]
@@ -260,23 +306,39 @@ class Ops(object):
             self.log("CMD", action=action, rc=rc, out=out.strip()[:200],
                      err=err.strip()[:200])
             return ok
-        ids = ids if ids is not None else self.ids
         all_ok = True
         self.last_results = []
-        for n, i in enumerate(ids):
+        for n, i in enumerate(use_ids):
             if n:
                 time.sleep(self.stagger_s)
             ok = False
-            for attempt in range(1, self.retries + 1):
-                rc, out, err = self._run(tmpl, did=i)
-                self.log("CMD", action=action, drone=i, attempt=attempt,
-                         rc=rc, out=out.strip()[:200], err=err.strip()[:200])
-                if rc == 0:
-                    ok = True
-                    break
-                print("  d%s %s attempt %d/%d rc=%d %s"
-                      % (i, action, attempt, self.retries, rc,
-                         (err or out).strip().replace("\n", " ")[:100]))
+            if ml_map and i in self.ml_ids:
+                # 贫机轨：MAVLink（bridge 命令口）——机载无 ssh 通道
+                for attempt in range(1, self.retries + 1):
+                    ok, ret = self._ml_cmd(ml_map, i)
+                    self.log("CMD", action=action, drone=i,
+                             attempt=attempt, via="mavlink", ret=ret)
+                    if ok:
+                        break
+                    print("  d%s %s attempt %d/%d via=mavlink ret=%s"
+                          % (i, action, attempt, self.retries, ret))
+            elif tmpl is None:
+                print("  d%s %s no route (not in ops.mavlink.ids, "
+                      "template missing)" % (i, action))
+                self.log("CMD", action=action, drone=i, rc=-1,
+                         out="no-route")
+            else:
+                for attempt in range(1, self.retries + 1):
+                    rc, out, err = self._run(tmpl, did=i)
+                    self.log("CMD", action=action, drone=i, attempt=attempt,
+                             rc=rc, out=out.strip()[:200],
+                             err=err.strip()[:200])
+                    if rc == 0:
+                        ok = True
+                        break
+                    print("  d%s %s attempt %d/%d rc=%d %s"
+                          % (i, action, attempt, self.retries, rc,
+                             (err or out).strip().replace("\n", " ")[:100]))
             mark = C_GRN + "OK" + C_RST if ok else C_RED + "FAIL" + C_RST
             print(" d%s %s %s" % (i, action, mark))
             self.last_results.append((i, ok))

@@ -55,6 +55,16 @@ ops:
     land: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/land.sh'"
     panic: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/land.sh'"
 
+  # 贫机 MAVLink 轨（P0-② panic 双轨化，2026-09-24 落地）：机载零代码的
+  # PX4+RTK 贫机无 ssh 通道，land/back/panic 经 gcs_mavlink_bridge.py
+  # 命令口下发（bridge --connect udpin:0.0.0.0:14550 --map "2:1,3:2" ...
+  # 同时吃贫机遥测上行→hub）。富机保持上面 cmds 的 ssh 模板；两轨
+  # per-drone 混跑互不依赖。E2E: tools/gcs/_e2e_panic.sh（d0 模板轨 /
+  # d1 MAVLink 轨 + fake PX4 实收 COMMAND_LONG 全绿）。
+  mavlink:
+    cmd_addr: 127.0.0.1:9871    # bridge 命令口（bridge 跑在地面站本机）
+    ids: []                     # TODO(联调日) 按编队填贫机 did，如 [1, 2, 3]
+
   # 真机调试接口（面板 DEBUG 窗 / `ops debug <名> [args]`）——约定只读，
   # 写操作一律走上面 cmds（两段确认）。{args}=参数槽。
   # source 用 devel/setup.sh（POSIX）而非 setup.bash——登录 shell 是

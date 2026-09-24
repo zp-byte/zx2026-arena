@@ -40,7 +40,8 @@ class Hub(object):
     def __init__(self, ids, link_lost_s, stall_vel, stall_s, plan_dead_s,
                  logpath, view, status_path=None, bat_min=None,
                  bat_low_s=5.0, fence=None, scene_drops=None,
-                 scene_pads=None, jump_thresh=3.0):
+                 scene_pads=None, jump_thresh=3.0,
+                 sep_warn=2.5, sep_crit=1.2, cpa_t=2.5):
         self.ids = [str(i) for i in ids]
         self.link_lost_s = link_lost_s
         self.stall_vel = stall_vel
@@ -53,6 +54,11 @@ class Hub(object):
         self.scene_drops = scene_drops  # FR-2.8 {drop_point_id:(x,y,z)} 或 None
         self.scene_pads = scene_pads  # FR-2.8 [(x,y),...] 起降 pad 或 None
         self.jump_thresh = jump_thresh  # FR-3.6 估计器跳变阈值(m)
+        # FR-4.0 空管（ATC）：机间间隔校验 + CPA 预判（贫机 RTK 位置统一消费）
+        self.sep_warn = sep_warn
+        self.sep_crit = sep_crit
+        self.cpa_t = cpa_t
+        self.pair_on = {}   # (da,db) -> {"warn": False, "crit": False}
         self.lock = threading.Lock()
         self.st = {i: {"data": None, "rx_t": 0.0, "stall_t0": None,
                        "stall_on": False, "lost_on": True,
@@ -68,7 +74,9 @@ class Hub(object):
                        # FR-3.6 估计器跳变（单次事件）
                        "prev_pos": None,
                        # FR-2.8 真机阶段推断
-                       "ever_air": False, "inferred_phase": None}
+                       "ever_air": False, "inferred_phase": None,
+                       # FR-4.0 空管速度基线（EMA 差分；vel 上报缺失时兜底）
+                       "vel_ema": None, "vel_t": None}
                    for i in self.ids}
         self.conns = 0
         self.stage = None  # 全局阶段机（/zx2026/state，agent 上报）
@@ -165,6 +173,71 @@ class Hub(object):
                 return "TAKEOFF"
             return "EXECUTE"
         return "EXECUTE"
+
+    # ---- FR-4.0 空管：两两间隔 + CPA 预判 ----------------------------------
+    def _atc(self, now, evs):
+        """机间间隔校验（贫机 RTK 位置与富机 agent 位置统一消费）。
+
+        速度优先取遥测上报 vel，缺失时用 EMA 差分基线（见 watchdog 维护）。
+        CPA：t* = -rp·rv/|rv|² clamp [0, cpa_t]，最小距离 = |rp + rv·t*|。
+        对称性：交换两机 rp/rv 同时取反，dist 与 CPA 结果不变——pair 键
+        排序仅为告警状态键稳定。边沿触发，恢复成对。
+        """
+        act = []
+        for did in self.ids:
+            st = self.st[did]
+            d = st["data"]
+            if d is None or st["lost_on"]:
+                continue
+            pos = d.get("pos")
+            if pos is None or len(pos) < 3:
+                continue
+            v = d.get("vel")
+            if isinstance(v, (list, tuple)) and len(v) == 3:
+                vel = [float(c) for c in v]
+            elif st["vel_ema"] is not None:
+                vel = st["vel_ema"]
+            else:
+                vel = [0.0, 0.0, 0.0]
+            act.append((did, pos, vel))
+        for a in range(len(act)):
+            for b in range(a + 1, len(act)):
+                da, pa, va = act[a]
+                db, pb, vb = act[b]
+                rp = [pa[c] - pb[c] for c in range(3)]
+                rv = [va[c] - vb[c] for c in range(3)]
+                dist = math.sqrt(sum(c * c for c in rp))
+                rn = sum(c * c for c in rv)
+                min_d = dist
+                if rn > 1e-6:
+                    rp_rv = sum(rp[c] * rv[c] for c in range(3))
+                    tc = max(0.0, min(self.cpa_t, -rp_rv / rn))
+                    m2 = dist * dist + 2.0 * tc * rp_rv + tc * tc * rn
+                    min_d = math.sqrt(max(0.0, m2))
+                key = (da, db) if da < db else (db, da)
+                pn = self.pair_on.setdefault(
+                    key, {"warn": False, "crit": False})
+                pk = "%s|%s" % key
+                if min_d < self.sep_crit:
+                    if not pn["crit"]:
+                        pn["crit"] = True
+                        pn["warn"] = True   # crit 蕴含 warn，一次对清
+                        evs.append((pk, "PROX_CRIT",
+                                    "dist=%.2f cpa=%.2f(τ<=%.1fs)"
+                                    % (dist, min_d, self.cpa_t)))
+                elif min_d < self.sep_warn:
+                    if pn["crit"]:
+                        pn["crit"] = False
+                        evs.append((pk, "PROX_OK",
+                                    "dist=%.2f (crit clear)" % dist))
+                    if not pn["warn"]:
+                        pn["warn"] = True
+                        evs.append((pk, "PROX_WARN",
+                                    "dist=%.2f cpa=%.2f(τ<=%.1fs)"
+                                    % (dist, min_d, self.cpa_t)))
+                elif pn["crit"] or pn["warn"]:
+                    pn["crit"] = pn["warn"] = False
+                    evs.append((pk, "PROX_OK", "dist=%.2f" % dist))
 
     # ---- 看门狗（1Hz）------------------------------------------------------
     def watchdog(self):
@@ -302,6 +375,27 @@ class Hub(object):
                                     st["prev_pos"][2], pos[0], pos[1], pos[2],
                                     jump)))
                     if pos is not None:
+                        # FR-4.0 速度基线（EMA 差分，限幅 5m/s）：vel 上报缺失
+                        # 时空管兜底；跳变帧（>jump_thresh，RTK 固定↔浮点切换
+                        # 米级跳变）不入基线防炸 CPA
+                        if st["vel_t"] is not None and \
+                                st["prev_pos"] is not None:
+                            dt = now - st["vel_t"]
+                            if 0.2 <= dt <= 3.0:
+                                dp = [pos[c] - st["prev_pos"][c]
+                                      for c in range(3)]
+                                if sum(c * c for c in dp) < \
+                                        self.jump_thresh ** 2:
+                                    inst = [max(-5.0, min(5.0, c / dt))
+                                            for c in dp]
+                                    if st["vel_ema"] is None:
+                                        st["vel_ema"] = inst
+                                    else:
+                                        st["vel_ema"] = [
+                                            0.5 * a + 0.5 * b
+                                            for a, b in zip(st["vel_ema"],
+                                                            inst)]
+                        st["vel_t"] = now
                         st["prev_pos"] = pos
                     # FR-2.8 真机阶段推断（phase=null 时以航迹邻近推断腿推进）
                     if phase is None and self.scene_pads is not None \
@@ -309,6 +403,8 @@ class Hub(object):
                         st["inferred_phase"] = self._infer_phase(d, pos, st)
                     elif phase is not None:
                         st["inferred_phase"] = None
+                # FR-4.0 空管：全员两两间隔+CPA（agent 机与 MAVLink 机统一）
+                self._atc(now, evs)
             for did, kind, detail in evs:
                 self.event(did, kind, detail)
             time.sleep(1.0)
@@ -364,11 +460,17 @@ class Hub(object):
                             if self.st[did]["mission"] is not None}
                 tasks = dict(self.tasks)
                 total = self.score_total
+                # FR-4.0 空管告警态透出（面板/ops 消费）
+                proximity = {"%s|%s" % k: dict(v)
+                             for k, v in self.pair_on.items()
+                             if v.get("warn") or v.get("crit")}
             snap["linked"] = linked   # 按数据年龄算的活链路数（比 TCP conns 真实）
             snap["events"] = evs
             snap["grids"] = grids
             snap["scores"] = scores
             snap["missions"] = missions
+            if proximity:
+                snap["proximity"] = proximity
             if tasks:
                 snap["tasks"] = tasks
             if total:
@@ -441,6 +543,11 @@ class Hub(object):
                                     pos, spd, pa, C_RST))
                 if alarms:
                     lines.append(" ALARM: " + " | ".join(alarms))
+                # FR-4.0 空管 pair 告警上屏
+                prox = ["%s%s" % (k, "(CRIT)" if v.get("crit") else "")
+                        for k, v in self.pair_on.items() if v.get("warn")]
+                if prox:
+                    lines.append(" PROX: " + " | ".join(sorted(prox)))
                 sc = [(did, self.st[did]["score"]) for did in self.ids
                       if self.st[did]["score"]]
                 if sc:
@@ -565,6 +672,13 @@ def main():
                     help="围栏内缩余量(m)")
     ap.add_argument("--jump-thresh", type=float, default=3.0,
                     help="估计器跳变阈值(m)，FR-3.6")
+    # FR-4.0 空管参数（贫机 RTK 位置与富机 agent 统一消费）
+    ap.add_argument("--sep-warn", type=float, default=2.5,
+                    help="机间告警间距(m)；低于 --sep-crit 升级 CRIT")
+    ap.add_argument("--sep-crit", type=float, default=1.2,
+                    help="机间危险间距(m)")
+    ap.add_argument("--cpa-t", type=float, default=2.5,
+                    help="CPA 预判时窗(s)")
     args = ap.parse_args()
     logpath = "%s/gcs_telem_%s.jsonl" % (args.logdir,
                                          time.strftime("%Y%m%d_%H%M%S"))
@@ -576,7 +690,9 @@ def main():
               args.stall_s, args.plan_dead, logpath, args.view,
               status_path=status_path, bat_min=args.bat_min,
               bat_low_s=args.bat_low_s, fence=fence, scene_drops=drops,
-              scene_pads=pads, jump_thresh=args.jump_thresh)
+              scene_pads=pads, jump_thresh=args.jump_thresh,
+              sep_warn=args.sep_warn, sep_crit=args.sep_crit,
+              cpa_t=args.cpa_t)
     srv = Srv(("0.0.0.0", args.port), Handler)
     srv.hub = hub
     threading.Thread(target=srv.serve_forever, daemon=True).start()
