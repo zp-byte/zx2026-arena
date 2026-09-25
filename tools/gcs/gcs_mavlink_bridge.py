@@ -31,6 +31,10 @@ PX4_MAIN = {1: "MANUAL", 2: "ALTCTL", 3: "POSCTL", 4: "AUTO",
             5: "ACRO", 6: "OFFBOARD", 7: "STABILIZED", 8: "RATTITUDE"}
 GPS_FIX = {1: "NOGPS", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK_FLOAT",
            6: "RTK_FIXED", 7: "STATIC"}
+# 贫机 phase 合成：PX4 主模式 → agent 任务态语义（ops 盯飞终态判定依赖
+# phase；贫机无 agent 状态机——由 bridge 从 FC 心跳+MISSION_REACHED 合成）
+PHASE_OF = {1: "MANUAL", 2: "MANUAL", 3: "MANUAL", 4: "EXECUTE",
+            5: "MANUAL", 6: "OFFBOARD", 7: "MANUAL", 8: "MANUAL"}
 
 
 def wgs84_to_enu(lat, lon, lat0, lon0):
@@ -67,6 +71,8 @@ class Bridge(object):
         self.seq = 0
         # mission 上传会话（一次一架；帧循环在收包线程内驱动）
         self.mission = None          # {"did","wps","expect_seq","t0","retry"}
+        self.mission_total = {}      # did -> 航点数（MISSION_REACHED 终态判据）
+        self.done_set = set()        # phase=DONE 锁（REACHED 后不被 FC 覆盖）
 
     # ---- 上行：MAVLink → agent JSON ----------------------------------------
     def _feed(self, did, key, val):
@@ -86,6 +92,19 @@ class Bridge(object):
             self._feed(did, "fc", PX4_MAIN.get(main, "MODE%d" % main))
             self._feed(did, "connected", bool(
                 msg.base_mode & mav.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED))
+            # DONE 锁最高优先：任务飞完 FC 回手动也不丢终态（ops 盯飞靠它收卷）
+            if did not in self.done_set:
+                self._feed(did, "phase",
+                           PHASE_OF.get(main, "MODE%d" % main))
+        elif t == "MISSION_ITEM_REACHED":
+            tot = self.mission_total.get(did)
+            # REACHED 每航点一发（10Hz 级），只在末项置锁时打一次防刷屏
+            if tot is not None and msg.seq >= tot - 1 \
+                    and did not in self.done_set:
+                print("[bridge] mission DONE did=%s (seq=%d/%d)"
+                      % (did, msg.seq, tot), flush=True)
+                self.done_set.add(did)
+                self._feed(did, "phase", "DONE")
         elif t == "GLOBAL_POSITION_INT":
             e, n = wgs84_to_enu(msg.lat * 1e-7, msg.lon * 1e-7,
                                 self.lat0, self.lon0)
@@ -159,6 +178,8 @@ class Bridge(object):
             items.append((seq, int(lat * 1e7), int(lon * 1e7), float(z)))
         self.mission = {"sysid": sysid, "items": items, "expect": 0,
                         "t0": time.time(), "retry": 0, "did": did}
+        self.mission_total[did] = len(items)
+        self.done_set.discard(did)   # 新任务装订=清旧终态锁
         return "ok(%d wps)" % len(items)
 
     def _mission_drive(self):
@@ -228,6 +249,8 @@ class Bridge(object):
         except Exception:
             return "bad_json"
         cmd = c.get("cmd")
+        if cmd == "ping":
+            return "pong"            # 探活不查 did（bridge 死活探针）
         did = str(c.get("did"))
         sysid = next((s for s, d in self.ids_map.items() if d == did), None)
         if sysid is None:
@@ -244,6 +267,11 @@ class Bridge(object):
                 self.mav.mav.command_long_send(
                     sysid, 1, mav.MAV_CMD_NAV_TAKEOFF, 0,
                     0, 0, 0, 0, 0, 0, z)
+            elif cmd == "param_set":
+                # 通用参数下发（GF_* geofence / COM_RCL_EXCP 等安全参数）
+                self.mav.mav.param_set_send(
+                    sysid, 1, str(c.get("name", "")).encode("ascii"),
+                    float(c.get("value", 0.0)), mav.MAV_PARAM_TYPE_REAL32)
             elif cmd == "rtl":
                 self.mav.mav.command_long_send(
                     sysid, 1, mav.MAV_CMD_NAV_RETURN_TO_LAUNCH, 0,

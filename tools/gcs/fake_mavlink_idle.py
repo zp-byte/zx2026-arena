@@ -30,6 +30,10 @@ def idle_px4(sysid, connect):
             1500, 500, 0, 0, 0, 6000)
         mav.sys_status_send(3, 0, 0, 0, 0, 12500, 85, 0, 0,
                             0, 0, 0, 0, 0)   # 14 参签名
+        mav.gps_raw_int_send(          # RTK_FIXED：rtk 窄列断言用
+            int(t * 1000000) & 0x7FFFFFFF, 6, int(30.0 * 1e7),
+            int(120.0 * 1e7), 50000, 0, 0, 0, 0, 12)
+        mav.mission_item_reached_send(1)   # 假任务末项 REACHED（phase 合成验证）
         while True:
             r = m.recv_match(blocking=False)
             if r is None:
@@ -40,6 +44,10 @@ def idle_px4(sysid, connect):
                 SEEN.append((sysid, names[r.command]))
                 print("[IDLE] sysid=%d %s seen" % (sysid, names[r.command]),
                       flush=True)
+            if r.get_type() == "PARAM_SET":
+                SEEN.append((sysid, "PARAM"))
+                print("[IDLE] sysid=%d PARAM %s=%.1f seen"
+                      % (sysid, r.param_id, r.param_value), flush=True)
         time.sleep(0.1)
 
 

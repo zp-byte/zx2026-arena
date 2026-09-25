@@ -131,10 +131,14 @@ class Ops(object):
         res = {}
         drones = (snap or {}).get("drones", {})
         stage = (snap or {}).get("stage")
-        # PREFLIGHT：遥测新鲜
+        # PREFLIGHT：遥测新鲜 + bridge 探活（贫机单点故障）
         bad = [i for i in self.ids
                if drones.get(i, {}).get("age") is None
                or drones[i]["age"] > self.link_lost_s]
+        if self.ml_ids:
+            alive, ret = self._ml_ping()
+            if not alive:
+                bad.append("bridge dead(%s)" % ret)
         res["PREFLIGHT"] = (not bad,
                             "linked" if not bad else "no/fresh telem: %s"
                             % ",".join(bad))
@@ -207,14 +211,18 @@ class Ops(object):
                 else "--"
             v = d.get("speed")
             pa = d.get("plan_age")
+            # RTK 状态窄列（F=FIXED f=FLOAT 3=3D 2=2D x=无 GPS -=未知）
+            rmark = {"RTK_FIXED": "F", "RTK_FLOAT": "f", "3D": "3",
+                     "2D": "2", "NOGPS": "x"}.get(d.get("rtk"), "-")
             col = C_GRN if age is not None and age <= self.link_lost_s \
                 else C_RED
-            print(" d%-2s %sage %-5s|%-9s|%-16s v %-5s plan %-6s%s"
+            print(" d%-2s %sage %-5s|%-9s|%-16s v %-5s plan %-6s "
+                  "rtk %-2s%s"
                   % (i, col, "%.1f" % age if age is not None else "--",
                      ph[:8], pos,
                      "%.2f" % v if v is not None else "--",
                      "%.1f" % pa if pa is not None and pa >= 0 else "never",
-                     C_RST))
+                     rmark, C_RST))
         for s in self.stages:
             ok, why = res[s]
             mark = C_GRN + "[OK]" + C_RST if ok else C_YEL + "[--]" + C_RST
@@ -285,6 +293,17 @@ class Ops(object):
             return ret.startswith("ok") or ret == "pong", ret
         except Exception as e:
             return False, str(e)[:80]
+
+    def _ml_ping(self):
+        """bridge 探活（2s 缓存）：bridge 进程死=贫机全部失联+失控——
+        单点故障必须进 PREFLIGHT 门，不是联调时的人肉检查项。"""
+        now = time.time()
+        if now - getattr(self, "_ping_t", 0.0) < 2.0 and \
+                hasattr(self, "_ping_r"):
+            return self._ping_r
+        r = self._ml_cmd("ping", "0", timeout=3.0)
+        self._ping_t, self._ping_r = now, r
+        return r
 
     def dispatch(self, action, ids=None):
         """模板含 {id}=逐机错峰+重试；不含=全局一次。返回全成与否。
@@ -457,6 +476,10 @@ class Ops(object):
             self.log("TRIGGER_FAIL")
             return 1
         print(" monitoring (timeout %.0fs)..." % monitor_timeout)
+        return self._monitor_loop(monitor_timeout)
+
+    def _monitor_loop(self, monitor_timeout):
+        """盯飞循环（start 与 deploy 共用）：事件流+终态判定+比分收卷。"""
         t0 = time.time()
         seen_ev = set()
         last_line = 0.0
@@ -627,8 +650,8 @@ class Ops(object):
               "--auto-cover X 走覆盖率自动判据")
         return 2
 
-    def deploy(self, wps_map, yes):
-        """进场段：贫机 mission 下发+takeoff（MAVLink 全轨，桥接 cmd 口）。"""
+    def deploy(self, wps_map, yes, monitor=True):
+        """进场段：贫机安全参数装订+mission 下发+takeoff（MAVLink 全轨）。"""
         poor = [i for i in self.ids if i in self.ml_ids]
         if not poor:
             print(" no poor drones in ops.mavlink.ids — nothing to deploy.")
@@ -642,6 +665,16 @@ class Ops(object):
         for n, did in enumerate(poor):
             if n:
                 time.sleep(self.stagger_s)
+            # 起飞前安全参数装订（geofence 等——贫机零感知，失控=飞出赛区）
+            for name, val in (self.ml.get("safety_params") or {}).items():
+                okp, retp = self._ml_cmd("param_set", did,
+                                         {"name": str(name),
+                                          "value": float(val)})
+                self.log("DEPLOY", drone=did, step="param:%s" % name,
+                         ok=okp, ret=retp)
+                if not okp:
+                    print("  d%s param %s FAIL(%s)" % (did, name, retp))
+                    all_ok = False
             wps = wps_map.get(did) or missions_cfg.get(did)
             if not wps:
                 print("  d%s no wps (CLI/profile 均无) — skip" % did)
@@ -661,6 +694,9 @@ class Ops(object):
         print(" DEPLOY %s — %d 贫机" % ("OK" if all_ok else "INCOMPLETE",
                                        len(poor)))
         self.log("DEPLOY_END", ok=all_ok)
+        if monitor and all_ok:
+            # 进场后自动转入盯飞（贫机 phase 由 bridge 合成，终态可判）
+            return self._monitor_loop(self.execute_timeout_s + 60.0)
         return 0 if all_ok else 1
 
     # ---- 真机调试接口（ssh）-------------------------------------------------
@@ -778,6 +814,8 @@ def main():
                     help='deploy 航点 "e,n,z;e,n,z"（ENU 米，配 --ids 单机）')
     ap.add_argument("--wps-file", default=None,
                     help="deploy 航点文件 JSON {did: [[e,n,z],...]}")
+    ap.add_argument("--no-monitor", action="store_true",
+                    help="deploy 完成后不转盯飞（E2E/调试用）")
     ap.add_argument("--out", default=None,
                     help="export 输出路径（缺省 run_logs/gcs_export_<ts>.tar.gz）")
     ap.add_argument("--force", action="store_true")
@@ -845,7 +883,8 @@ def main():
                    for w in args.wps.split(";")]
             for i in (args.ids.split(",") if args.ids else ops.ids):
                 wps_map[str(i)] = wps
-        raise SystemExit(ops.deploy(wps_map, args.yes))
+        raise SystemExit(ops.deploy(wps_map, args.yes,
+                                    monitor=not args.no_monitor))
     if args.action == "preflight":
         raise SystemExit(ops.preflight(args.preflight_timeout))
     if args.action == "start":

@@ -434,6 +434,10 @@ class Hub(object):
                         "bat": d.get("bat") if d else None,
                         "fc": d.get("fc") if d else None,
                         "connected": d.get("connected") if d else None,
+                        # 贫机 MAVLink 透传字段（bridge 合成）：RTK/星数/航向
+                        "rtk": d.get("rtk") if d else None,
+                        "sats": d.get("sats") if d else None,
+                        "yaw": d.get("yaw") if d else None,
                         "lost_on": st["lost_on"], "stall_on": st["stall_on"],
                         "pdead_on": st["pdead_on"], "bat_on": st["bat_on"],
                         # FR-3.4/1.7/3.5 告警态

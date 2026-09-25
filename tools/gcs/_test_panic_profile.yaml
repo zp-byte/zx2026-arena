@@ -12,6 +12,9 @@ ops:
     takeoff_z: 2.5
     missions:
       1: [[1.5, 0.5, 2.0], [3.0, 1.0, 2.0]]   # deploy 静态指派（2 航点）
+    safety_params:
+      GF_MAX_HOR_DIST: 50.0
+      GF_ACTION: 3.0
   cmds:
     land: "true"
     takeoff: "true"    # recon 强机起飞假模板（rc=0）

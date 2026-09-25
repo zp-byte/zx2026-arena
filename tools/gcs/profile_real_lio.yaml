@@ -71,6 +71,10 @@ ops:
                                 #   `deploy --wps "e,n,z;..." --ids <贫机>`。
                                 #   阶段闸门：recon(强机侦察)→gate(覆盖率/
                                 #   人工放行)→deploy(贫机 mission+takeoff)
+    safety_params: {}           # 贫机起飞前参数装订（deploy 逐机 param_set）：
+                                #   PX4 geofence 防失控飞出赛区，如
+                                #   GF_MAX_HOR_DIST: 50.0 / GF_MAX_VER_DIST: 8.0
+                                #   / GF_ACTION: 3.0（RTL）——数值赛前定谳
 
   # 真机调试接口（面板 DEBUG 窗 / `ops debug <名> [args]`）——约定只读，
   # 写操作一律走上面 cmds（两段确认）。{args}=参数槽。

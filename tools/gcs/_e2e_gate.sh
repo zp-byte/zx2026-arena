@@ -35,10 +35,21 @@ echo "== gate HOLD（阈值 0.9 > 0.5 封顶）=="
 python3 gcs_ops.py --profile _test_panic_profile.yaml gate --auto-cover 0.9
 echo "hold_exit=$?"
 echo
-echo "== deploy --yes（贫机 d1 mission+takeoff）=="
-python3 gcs_ops.py --profile _test_panic_profile.yaml deploy --yes
+echo "== deploy --yes --no-monitor（param装订+mission+takeoff）=="
+python3 gcs_ops.py --profile _test_panic_profile.yaml deploy --yes --no-monitor
 echo "deploy_exit=$?"
 sleep 3   # 让开 fake 收包窗
+echo
+echo "== phase 合成断言（REACHED→DONE 锁）=="
+python3 - <<'PYEOF'
+import json
+s = json.load(open('/tmp/gcs_ml_status.json'))
+d = (s.get('drones') or {}).get('1') or {}
+ph, rk, fc = d.get('phase'), d.get('rtk'), d.get('fc')
+print('d1 phase=%s rtk=%s fc=%s' % (ph, rk, fc))
+print('PHASE_ASSERT=' + ('PASS' if (ph == 'DONE' and rk == 'RTK_FIXED'
+                                    and fc == 'AUTO') else 'FAIL'))
+PYEOF
 echo
 echo "== idle fake log =="
 cat /tmp/gcs_gd_idle.log
