@@ -29,6 +29,21 @@ topics:
   grid_cloud: null            # TODO 现场定 LIO 累积点云 topic（FR-1.4 real 建图）——
                               #   cloud_adapter.py --src 同步此名（2026-09-18 落地）
 
+# 坐标对齐（B 方案 2026-09-25）：faster_lio /Odometry 是"上电点原点"机载局部系，
+# 上报前变换到场地 ENU：p_e = R(yaw0)·(p_l − c) + [ex0, ny0]
+#   yaw0_deg = LIO 系 x 轴相对 ENU 东向的偏角（逆时针正）——起飞对场地标线后填；
+#              若上电点桩位+标线对齐良好，此项可为 0（联调日按建图叠先验布局校）
+#   ex0/ny0  = 上电点在 ENU 的坐标（米）；上电点=ENU 原点桩位时保持 0
+#   auto_origin: 起飞前静止 static_frames 帧取均值自动扣 LIO 初始化偏置 c；
+#     窗内位移超 static_gate_m（=agent 空中重启，无静止窗）→ 放弃 c=(0,0) 告警
+pose_tf:
+  yaw0_deg: 0.0
+  ex0: 0.0
+  ny0: 0.0
+  auto_origin: true
+  static_frames: 50
+  static_gate_m: 0.3
+
 # GCS 操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
 # 脚本语义（sh_files 源码核实）: takeoff/land = /px4ctrl/takeoff_land cmd 1/2；
 # back = /back_trigger；trigger(pub_trigger) = /move_base_simple/goal 一帧

@@ -43,6 +43,23 @@ class Agent(object):
         self.seq = 0
         self.tp = cfg["topics"]
         self.stage = None  # 全局阶段机（/zx2026/state），非 per-drone
+        # pose_tf（B 方案 2026-09-25）：真机 LIO 局部系 → 场地 ENU。
+        # p_e = R(yaw0)·(p_l − c) + [ex0, ny0]；z 不转（yaw 旋转不涉 u 轴）。
+        # sim 档案无 pose_tf 段 → tf_on=False 恒等零开销。
+        tf = cfg.get("pose_tf") or {}
+        self.tf_yaw0 = math.radians(float(tf.get("yaw0_deg", 0.0)))
+        self.tf_c = math.cos(self.tf_yaw0)
+        self.tf_s = math.sin(self.tf_yaw0)
+        self.tf_ex0 = float(tf.get("ex0", 0.0))
+        self.tf_ny0 = float(tf.get("ny0", 0.0))
+        self.tf_auto = bool(tf.get("auto_origin", False))
+        self.tf_static_n = int(tf.get("static_frames", 50))
+        self.tf_gate = float(tf.get("static_gate_m", 0.3))
+        self.tf_on = bool(tf) and (
+            self.tf_yaw0 != 0.0 or self.tf_ex0 != 0.0 or self.tf_ny0 != 0.0
+            or self.tf_auto)
+        self.tf_acc = {i: {"buf": [], "c": (0.0, 0.0), "locked": False,
+                           "gave_up": False} for i in self.ids}
 
     @staticmethod
     def _blank():
@@ -155,12 +172,55 @@ class Agent(object):
                 if dt > 0.05:
                     v = [(p.x - pp[0]) / dt, (p.y - pp[1]) / dt,
                          (p.z - pp[2]) / dt]
-            st["pos"] = [p.x, p.y, p.z]
-            st["yaw"] = math.degrees(yaw)
-            st["vel"] = v
-            st["speed"] = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+            px, py, pyaw, vx, vy = p.x, p.y, yaw, v[0], v[1]
+            if self.tf_on:
+                # LIO 局部系 → ENU 场地系；prev 恒存原始坐标，差分基准不变
+                px, py, pyaw, vx, vy = self._tf_apply(i, p.x, p.y, yaw,
+                                                      v[0], v[1], now)
+            st["pos"] = [px, py, p.z]
+            st["yaw"] = math.degrees(pyaw)
+            st["vel"] = [vx, vy, v[2]]
+            st["speed"] = math.sqrt(vx * vx + vy * vy + v[2] * v[2])
             st["prev"] = ([p.x, p.y, p.z], now)
             st["live_t"]["odom"] = now
+
+    def _tf_sample(self, i, x, y, now):
+        """auto_origin：起飞前静止窗采 LIO 初始化偏置 c（前 N 帧均值）。
+
+        窗内位移超 static_gate_m（=agent 在空中重启，无静止窗）→ 永久
+        放弃并保持 c=(0,0) 告警——不猜。锁定后不再采样。
+        """
+        if not self.tf_auto:
+            return (0.0, 0.0)
+        a = self.tf_acc[i]
+        if a["locked"] or a["gave_up"]:
+            return a["c"]
+        a["buf"].append((x, y))
+        if len(a["buf"]) > 1:
+            x0, y0 = a["buf"][0]
+            if math.hypot(x - x0, y - y0) > self.tf_gate:
+                a["gave_up"] = True
+                print("[agent] pose_tf auto_origin ABORT did=%s (moving at"
+                      " startup) — c=(0,0)" % i, flush=True)
+                return a["c"]
+        if len(a["buf"]) >= self.tf_static_n:
+            n = len(a["buf"])
+            a["c"] = (sum(b[0] for b in a["buf"]) / n,
+                      sum(b[1] for b in a["buf"]) / n)
+            a["locked"] = True
+            print("[agent] pose_tf auto_origin LOCKED did=%s c=(%.3f,%.3f)"
+                  % (i, a["c"][0], a["c"][1]), flush=True)
+        return a["c"]
+
+    def _tf_apply(self, i, x, y, yaw, vx, vy, now):
+        """p_e = R(yaw0)·(p_l − c) + [ex0, ny0]；速度只转不移；yaw 加 yaw0。"""
+        cx, cy = self._tf_sample(i, x, y, now)
+        dx, dy = x - cx, y - cy
+        return (dx * self.tf_c - dy * self.tf_s + self.tf_ex0,
+                dx * self.tf_s + dy * self.tf_c + self.tf_ny0,
+                yaw + self.tf_yaw0,
+                vx * self.tf_c - vy * self.tf_s,
+                vx * self.tf_s + vy * self.tf_c)
 
     def _on_phase(self, msg, i):
         with self.lock:
