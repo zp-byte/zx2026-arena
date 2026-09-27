@@ -3,7 +3,8 @@
 profile: real_lio
 mode: real                    # 一级开关：real=起飞先行+POWER/FC 门+危险命令 --yes
                               # (hub 侧须加 --bat-min 30 才有 LOW_BAT 告警)
-server: 192.168.1.10:9870     # TODO(联调日第一件事) 现场按地面站实际 IP 改
+server: 192.168.31.117:9870   # 地面站笔记本（本机 2026-09-27 定谳）；DHCP 变动
+                              # 用 provision_real.sh --server 回填
 send_hz: 5.0
 ids: [0]                      # 单 agent 带本机: 写 [DRONE_ID] 的值
 topics:
@@ -20,7 +21,9 @@ topics:
   battery: /mavros/battery    # sensor_msgs/BatteryState
   fc: /mavros/state           # mavros_msgs/State (connected/mode)
   liveness:                   # vel_bridge 50Hz 定时器直发（恒频贯穿悬停+任务
-    - /position_cmd           #   两态；桥死=断流=PLANNER_DEAD 告警，语义最优）
+    - /setpoints_cmd          #   两态；桥死=断流=PLANNER_DEAD 告警，语义最优）。
+                              #   【2026-09-27 定谳】注入话题=/setpoints_cmd
+                              #   （px4ctrl ~cmd remap），/position_cmd 是历史误记
   stage: null                 # 仅 1 号机 profile 改 /zx2026/state（本地
                               #   stage_controller 直发+上报）；其余机保持
                               #   null=本机无本地源，fleet 回声经 --fleet-bridge
