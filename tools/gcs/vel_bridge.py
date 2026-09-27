@@ -32,7 +32,9 @@ HOVER）→ RC 扳 CMD_CTRL → 本桥输出生效 → 结束 land.sh。
 自检（WSL 无 ROS/quadrotor_msgs 可跑）：
   python3 vel_bridge.py --selftest
 用法（机载 Jetson，source ~/Diff-planner/devel/setup.sh 后）：
-  python3 vel_bridge.py --id 0 [--max-vel 2.0] [--rate 50]
+  python3 vel_bridge.py --id 0 [--max-vel 2.0] [--rate 50] --out /setpoints_cmd
+  【2026-09-27 定谳】px4ctrl（run_ctrl_lio.launch）~cmd remap 到 /setpoints_cmd——
+  注入必须 --out /setpoints_cmd，默认 /position_cmd 打空（real_fleet.launch 已显式）。
 """
 import argparse
 import math

@@ -9,7 +9,10 @@
          /ekf/ekf_odom（LIO 局部系）
            ├─ odom_tf → /drone_<id>/odom（ENU；nav/mission/agent 消费）
            ├─ cloud_adapter（四道滤+同帧变换）→ /drone_<id>/cloud
-           └─ vel_bridge（vel_cmd ENU→局部系逆变换）→ /position_cmd（px4ctrl）
+           └─ vel_bridge（vel_cmd ENU→局部系逆变换）→ /setpoints_cmd（px4ctrl；
+              run_ctrl_lio.launch ~cmd remap 定谳 2026-09-27——px4ctrl 实际订
+              /setpoints_cmd，官方 traj_server 同此名；vel_bridge 默认
+              /position_cmd 是历史误记，已在本 launch 显式 --out 纠偏）
          hub fleet 下行 → gcs_agent（fleet-bridge 开关）→ /drone_<id>/odom_from_<s>
          mission_loader → /zx2026/mission/<id>（人工指派装订）
        部署三件套（拷机载后零代码改动）：
@@ -81,10 +84,13 @@
        done 永不来=executor 停在 DROP（安全侧失败，不误投）。 -->
 
 
-  <!-- 桥 3：vel_cmd→/position_cmd（px4ctrl CMD_CTRL 档；断链 0.5s→HOLD 定点） -->
+  <!-- 桥 3：vel_cmd→/setpoints_cmd（px4ctrl CMD_CTRL 档；断链 0.5s→HOLD 定点）。
+       【2026-09-27 定谳】必须显式 --out /setpoints_cmd：run_ctrl_lio.launch 把
+       px4ctrl ~cmd remap 到该名（源码实锤），vel_bridge 默认 /position_cmd 是
+       历史误记——不纠偏则注入打空、CMD_CTRL 永不生效（首飞级隐患）。 -->
   <node pkg="arena_bridges" type="vel_bridge.py" name="vel_bridge" output="screen"
         args="--id $(arg id) --odom $(arg odom_src) --yaw0-deg $(arg yaw0_deg)
-              --max-vel $(arg max_vel)"/>
+              --max-vel $(arg max_vel) --out /setpoints_cmd"/>
 
   <!-- GCS 代理：遥测上行 + fleet 下行桥（邻机感知 odom_from_<s> 契约） -->
   <node pkg="arena_bridges" type="gcs_agent.py" name="gcs_agent" output="screen"

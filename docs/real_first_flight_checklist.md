@@ -86,3 +86,39 @@
 
 ——勾完全部 = 具备 zx2026 栈单机自由飞资格；六机另案（机间观测来源
 未解决前不上多机）。
+
+## 九、2026-09-27 定谳补录（px4ctrl 两未核项闭环 + 新雷三枚）
+
+> 原预登记"px4ctrl 两未核项定谳（翻 Diff-planner 源码即可，别留到现场）"——
+> 本日连同新发现共五项闭环，全部源码/实弹取证，无需到场再查。
+
+**① cmd 超时**：`ctrl_param_fpv.yaml` → `msg_timeout.cmd: 0.5`（s）。vel_bridge
+50Hz 发流远超门限；停发 0.5s 后 CMD_CTRL→AUTO_HOVER（HOLD 定点语义成立）。
+
+**② 进档方式 = RC 拨杆，无 track 服务**（PX4CtrlFSM.cpp 实锤）：
+MANUAL(L1) →（RC hover 档）AUTO_HOVER(L2) →（RC command 档 + FCU OFFBOARD +
+cmd 流在）CMD_CTRL(L3)；L3 退档 = RC 切回或 cmd 断 0.5s → AUTO_HOVER。
+AUTO_LAND 只能在 AUTO_HOVER 触发（CMD_CTRL 里 reject）。
+发布 TRIGGER（publish_trigger）是给规划器的，不是进档服务——勿混。
+
+**③ vel_bridge 注入话题错位（首飞级隐患，已修 real_fleet.launch）**：
+run_ctrl_lio.launch 把 px4ctrl `~cmd` remap 到 **/setpoints_cmd**（源码实锤），
+vel_bridge 默认 `--out /position_cmd` 是历史误记——不纠偏注入打空、CMD_CTRL
+永不生效。已在 real_fleet.launch 显式 `--out /setpoints_cmd` 纠偏，本文档与
+vel_bridge.py 用法行同步改。
+
+**④ mavros 是 LIO/EKF 的 IMU 硬依赖（数据链，非控制链）**：
+faster_lio mid360.yaml `imu_topic: /mavros/imu/data`（Option 2，/livox/imu 被注
+释）；ekf_lidar.launch 同订 mavros IMU。mavros 不起则 faster_lio 永不出
+odometry。**nv 曾不在 dialout 组 → serial open Permission denied**（本日根治
+usermod -aG dialout）；FCU 口定谳 = 默认 `/dev/ttyTHS1:921600`（connected:True
++ IMU 265Hz；/dev/ttyUSB0 CP2102 反而不通）。mavros 在 boot_all 中仅作被动数
+据源，无解锁/OFFBOARD 指令通路。
+
+**⑤ ekf 包真名 = `ekf`**（源码目录叫 ekf_pose，pkg 声明是 ekf）——
+`roslaunch ekf ekf_lidar.launch`，ekf_pose 是 RLException。
+
+**上电一键**：本日固化 `tools/realboot/`（boot_zx.sh 一键 → boot_all.zsh 传感器
+链 9 检 + d435_watchdog.zsh 看门狗），机上落 `~/boot/`。依赖次序：对时→
+roscore→mavros(IMU)→faster_lio→ekf→cloud_adapter→D435→detector，全绿=传感器
+链就绪。飞行栈（px4ctrl/vel_bridge/real_fleet.launch）不在其中，按分层另起。
