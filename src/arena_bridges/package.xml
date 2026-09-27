@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>arena_bridges</name>
+  <version>0.1.0</version>
+  <description>真机桥接层：LIO 局部系→ENU 变换(odom_tf)、点云四道滤适配(cloud_adapter)、vel_cmd→px4ctrl 注入(vel_bridge)、任务指派装订(mission_loader)、GCS 代理(gcs_agent)。单一源在 tools/gcs/，本包 scripts/ 只是 roslaunch shim。</description>
+  <maintainer email="team@example.com">team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>zx2026_common</exec_depend>
+  <exec_depend>mavros_msgs</exec_depend>
+</package>

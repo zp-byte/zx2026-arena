@@ -1,0 +1,102 @@
+<launch>
+  <!-- =============================================================================
+       real_fleet.launch — 真机单机注入栈（2026-09-26，每机一份，id 参数各机不同）
+       =============================================================================
+       定位：三桥一芯的"桥+芯"编排。官方栈（mavros / faster-lio / ekf / px4ctrl）
+       由 Diff-planner 的 sh_files 拉起，不在本文件管辖——本 launch 的前置判据：
+         rostopic hz /ekf/ekf_odom 活（LIO+EKF 就绪）
+       链路（全部 sim 同码零改动，只换输入源）：
+         /ekf/ekf_odom（LIO 局部系）
+           ├─ odom_tf → /drone_<id>/odom（ENU；nav/mission/agent 消费）
+           ├─ cloud_adapter（四道滤+同帧变换）→ /drone_<id>/cloud
+           └─ vel_bridge（vel_cmd ENU→局部系逆变换）→ /position_cmd（px4ctrl）
+         hub fleet 下行 → gcs_agent（fleet-bridge 开关）→ /drone_<id>/odom_from_<s>
+         mission_loader → /zx2026/mission/<id>（人工指派装订）
+       部署三件套（拷机载后零代码改动）：
+         ① settings_real.yaml → zx2026_common/config/sim_settings.yaml（覆盖）
+         ② missions.yaml / profile_real_lio.yaml → tools/gcs/（各机拷贝改 ids；
+            仅 1 号机 profile 保留 topics.stage，其余机删 stage 键让 fleet 回声接管）
+         ③ catkin build（本包 arena_bridges 参与编入 devel）
+       首飞限速：max_vel 保持 1.2 保守档（settings_real closed_loop.max_vel 同步）。
+  -->
+  <arg name="id" default="0"/>
+  <arg name="yaw0_deg" default="0.0" doc="LIO 系 x 轴相对场地 ENU 东向的安装偏角（odom_tf/cloud_adapter/vel_bridge 三桥同源参数）"/>
+  <arg name="ex0" default="0.0" doc="场地 ENU 原点平移（东）"/>
+  <arg name="ny0" default="0.0" doc="场地 ENU 原点平移（北）"/>
+  <arg name="odom_src" default="/ekf/ekf_odom" doc="官方 EKF 融合输出（源码定谳；现场 rostopic list 复核）"/>
+  <arg name="cloud_src" default="/laserMapping/cloud_registered" doc="faster-lio 配准点云（2026-09-26 机上定谳：该 fork 输出带 /laserMapping 前缀；ekf 链同源带前缀恰好匹配）"/>
+  <arg name="server" default="192.168.31.100:9870" doc="GCS hub 地址（遥测上行+fleet 下行）"/>
+  <arg name="max_vel" default="1.2" doc="vel_bridge 限幅（首飞 1.2 保守档）"/>
+  <arg name="missions" default="$(env HOME)/zx2026_arena_ws/tools/gcs/missions.yaml" doc="人工指派文件"/>
+  <arg name="profile" default="$(env HOME)/zx2026_arena_ws/tools/gcs/profile_real_lio.yaml" doc="agent 档案（每机拷贝改 ids；stage 键见头部②）"/>
+  <arg name="stage_local" default="false" doc="仅 1 号机置 true：本地跑全局阶段机；/zx2026/start 人工 rosservice call 触发"/>
+
+  <!-- 桥 1：odom 变换 LIO 局部系→ENU，out 话题直接对上 nav 的 ns+/odom（省 remap） -->
+  <node pkg="arena_bridges" type="odom_tf.py" name="odom_tf" output="screen"
+        args="--id $(arg id) --odom $(arg odom_src) --out /drone_$(arg id)/odom
+              --yaw0-deg $(arg yaw0_deg) --ex0 $(arg ex0) --ny0 $(arg ny0)"/>
+
+  <!-- 桥 2：真云四道滤（地面滤最要害）+ 滤后同帧变换 → nav 建图输入 -->
+  <node pkg="arena_bridges" type="cloud_adapter.py" name="cloud_adapter" output="screen"
+        args="--id $(arg id) --src $(arg cloud_src) --odom $(arg odom_src)
+              --yaw0-deg $(arg yaw0_deg) --ex0 $(arg ex0) --ny0 $(arg ny0)"/>
+
+  <!-- 导航芯（sim 同码；真机版设置靠①的文件覆盖，非此处参数） -->
+  <node pkg="arena_nav" type="nav_node.py" name="nav_node" output="screen">
+    <param name="drone_id" value="$(arg id)"/>
+  </node>
+
+  <!-- 任务芯（sim 同码） -->
+  <node pkg="arena_mission" type="mission_executor_node.py" name="executor" output="screen">
+    <param name="drone_id" value="$(arg id)"/>
+  </node>
+
+  <!-- 任务指派装订（latched；指派文件人工维护，缺条目启动即失败不带错飞） -->
+  <node pkg="arena_bridges" type="mission_loader.py" name="mission_loader" output="screen"
+        args="--id $(arg id) --yaml $(arg missions)"/>
+
+  <!-- 释放门二次确认（type_match，每机一份本实例只服务本机）：RECON LOCK 后
+       AT_DROP 的放行由 match/result MATCH 驱动（位置门+箱色复核），TIMEOUT 走
+       executor 重试链（回 EXECUTE 重扫）。sim 由 stack_nodes 全局单例跑，
+       真机跨 master 必须每机本地跑一份——缺它 = AT_DROP 永不放行（残留
+       审计 2026-09-26 抓出的部署缺口）。 -->
+  <node pkg="arena_mission" type="type_match_node.py" name="type_match" output="screen"/>
+
+  <!-- 识别线（camera:=true 时启用）：通用 HSV 检测器，进 Image 出
+       /drone_<id>/detected/{color,type,confidence}（type_match 消费契约）。
+       相机话题联调日 rostopic list 定谳后经 camera_topic 传入；首飞无相机
+       线保持 camera:=false，match 走 TIMEOUT/参考指派 fallback（sim 同码）。 -->
+  <arg name="camera" default="false" doc="下视相机识别线开关（vendor 相机话题定谳后置 true）"/>
+  <arg name="camera_topic" default="/drone_$(arg id)/camera/image_raw" doc="真机相机 sensor_msgs/Image 话题"/>
+  <node if="$(arg camera)" pkg="arena_sensor" type="color_detector_node.py"
+        name="color_detector" output="screen">
+    <param name="drone_id" value="$(arg id)"/>
+    <param name="image_topic" value="$(arg camera_topic)"/>
+  </node>
+
+  <!-- 投放执行桥（真实抛投机构接入后启用）：mission_executor 发
+       /drone_<id>/payload/command(UInt8)，等 /drone_<id>/payload/done(Bool)
+       ——sim 里 done 由 drop_simulator 假装；真机须接机构控制器的节点，
+       接口联调日定谳后落 arena_bridges（CLI 串口/GPIO）。缺桥=命令发无人收
+       done 永不来=executor 停在 DROP（安全侧失败，不误投）。 -->
+
+
+  <!-- 桥 3：vel_cmd→/position_cmd（px4ctrl CMD_CTRL 档；断链 0.5s→HOLD 定点） -->
+  <node pkg="arena_bridges" type="vel_bridge.py" name="vel_bridge" output="screen"
+        args="--id $(arg id) --odom $(arg odom_src) --yaw0-deg $(arg yaw0_deg)
+              --max-vel $(arg max_vel)"/>
+
+  <!-- GCS 代理：遥测上行 + fleet 下行桥（邻机感知 odom_from_<s> 契约） -->
+  <node pkg="arena_bridges" type="gcs_agent.py" name="gcs_agent" output="screen"
+        args="--profile $(arg profile) --fleet-bridge"/>
+
+  <!-- 全局阶段机（仅 1 号机；fleet 回声把 stage 发给其余机）。
+       真机程序缺口（残留审计 2026-09-26）：/zx2026/fleet_ready 真机无供给方
+       （sim 由 arena 栈发），P1_INIT 会卡死——起飞前须人工发一次
+         rostopic pub /zx2026/fleet_ready std_msgs/Bool "data: true"
+       ；P2→P3 靠 rosservice call /zx2026/start；他机 mission/phase 跨
+       master 不可见，P3→P4 与 P4→DONE 由 phase_timeout 60s / time_limit
+       1500s 超时兜底推进（executor 1Hz state 心跳保证晚到机不漏触发）。 -->
+  <node if="$(arg stage_local)" pkg="arena_mission" type="stage_controller_node.py"
+        name="stage_controller" output="screen"/>
+</launch>

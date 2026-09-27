@@ -7,42 +7,48 @@ server: 192.168.1.10:9870     # TODO(联调日第一件事) 现场按地面站�
 send_hz: 5.0
 ids: [0]                      # 单 agent 带本机: 写 [DRONE_ID] 的值
 topics:
-  odom: /Odometry             # faster_lio 输出（twist 恒零时 agent 自动位置差分）
+  odom: /drone_{id}/odom      # odom_tf 输出（ENU；2026-09-26 真机适配改挂）——
+                              #   变换链 /ekf/ekf_odom(LIO 局部系，官方 fork
+                              #   laser_mapping.cc:309 → ekf_lidar.launch 融合)
+                              #   → odom_tf 三桥共用变换 → ENU。agent 上报本
+                              #   输出即遥测/邻机 fleet 全 ENU，agent 内置
+                              #   pose_tf 恒等退役（见下段）
   phase: null                 # 源码定论: multipoint 无状态机话题（multipointplan.cpp
                               #   只发 takeoff_land/move_base_simple/goal/back_trigger/
                               #   goal/planning_yaw）——任务终态判定走 MONITOR_TIMEOUT
                               #   语义（盯飞超时=转 hub dash 人工盯）
   battery: /mavros/battery    # sensor_msgs/BatteryState
   fc: /mavros/state           # mavros_msgs/State (connected/mode)
-  liveness:                   # TODO 现场定谳: rostopic hz，判据=恒频贯穿"悬停+任务"两态
-    - /drone_{id}_planning/trajectory   # FSM 事件型(重规划才发,慎选)
-                              # 候选: /position_cmd (traj_server 100Hz 定时器)
-  stage: null                 # 真机无全局阶段机——READY 门走 "stage topic n/a" 分支
+  liveness:                   # vel_bridge 50Hz 定时器直发（恒频贯穿悬停+任务
+    - /position_cmd           #   两态；桥死=断流=PLANNER_DEAD 告警，语义最优）
+  stage: null                 # 仅 1 号机 profile 改 /zx2026/state（本地
+                              #   stage_controller 直发+上报）；其余机保持
+                              #   null=本机无本地源，fleet 回声经 --fleet-bridge
+                              #   转 ROS（防阶段倒退竞态的 echo 门即此键）
   grid: null                  # TODO 真机建图上屏: grid_map/occupancy 是 PointCloud2
                               #   (需独立适配器), 与仿真 OccupancyGrid 不同型
   score: null                 # 真机无 scorekeeper——比分条显示 --
-  mission: null               # 真机任务指派 multipoint points.yaml 内部持有
+  mission: /zx2026/mission/{id}   # mission_loader 本地装订输出（latched）——
+                              #   hub 指派显示+FR-2.8 阶段推断的参考投放点
+  task: /zx2026/task_update   # 本机 mission_executor 直发（他机进度经 fleet
+                              #   回声补全，本桥 skip 自身防重复）
   match: null                 # TODO 真机类型匹配适配器（FR-1.8）
   drop_done: null             # TODO 真机投放确认适配器（FR-1.8）
-  metrics: null               # 真机无 nav_metrics（FR-1.7 sim 专属）
+  metrics: /drone_{id}/nav_metrics   # settings_real nav.metrics.enabled=true
+                              #   → nav 直发 11 项；FR-1.7 碰撞/clearance 上屏
   match_progress: null        # TODO 真机匹配进度适配器（FR-1.9）
   grid_cloud: null            # TODO 现场定 LIO 累积点云 topic（FR-1.4 real 建图）——
                               #   cloud_adapter.py --src 同步此名（2026-09-18 落地）
 
-# 坐标对齐（B 方案 2026-09-25）：faster_lio /Odometry 是"上电点原点"机载局部系，
-# 上报前变换到场地 ENU：p_e = R(yaw0)·(p_l − c) + [ex0, ny0]
+# 坐标对齐——【2026-09-26 起 agent pose_tf 段退役】：变换统一归 odom_tf 节点
+# 管（nav/mission/vel_bridge/cloud_adapter/agent 全链共用一份，防双重变换）。
+# 参数改在 real_fleet.launch 传三桥同源 CLI（--yaw0-deg/--ex0/--ny0）：
 #   yaw0_deg = LIO 系 x 轴相对 ENU 东向的偏角（逆时针正）——起飞对场地标线后填；
 #              若上电点桩位+标线对齐良好，此项可为 0（联调日按建图叠先验布局校）
 #   ex0/ny0  = 上电点在 ENU 的坐标（米）；上电点=ENU 原点桩位时保持 0
-#   auto_origin: 起飞前静止 static_frames 帧取均值自动扣 LIO 初始化偏置 c；
-#     窗内位移超 static_gate_m（=agent 空中重启，无静止窗）→ 放弃 c=(0,0) 告警
-pose_tf:
-  yaw0_deg: 0.0
-  ex0: 0.0
-  ny0: 0.0
-  auto_origin: true
-  static_frames: 50
-  static_gate_m: 0.3
+#   auto_origin（静止窗扣 LIO 初始化偏置 c、空中重启放弃不猜）在 odom_tf
+#   内建——此段键值必须保持删除/全零：agent 再留非零值=双重变换（遥测错位）
+#   agent 侧按"无 pose_tf 键"恒等直报 /drone_{id}/odom 的 ENU 输出。
 
 # GCS 操作编排（gcs_ops.py）——真机命令模板（ssh 逐机执行）
 # 脚本语义（sh_files 源码核实）: takeoff/land = /px4ctrl/takeoff_land cmd 1/2；
@@ -60,15 +66,18 @@ pose_tf:
 #   联调日仍跑 DEBUG 窗 ws 探针（ls -d ~/Diff*）一次复核。
 #   panic=逐机 ssh land，交付前必须 no-prop bench（tools/gcs/bench_check.sh）
 #   实弹验证，vel_bridge 注入点/安全语义见 gcs_runbook §3.1。
+#   【2026-09-26 单机试飞钉死】cmds/debug_ssh host=nv@192.168.31.76（实机）；
+#   多机现场按 IP 分配表重填并恢复 {id} 占位。server 字段=agent 上报目标
+#   （地面站 IP），仍留 TODO 联调日现场定。
 ops:
   status_file: /home/ubuntu/zx2026_arena_ws/run_logs/gcs_status.json
   shell_prefix: ""
   cmds:
-    trigger: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/pub_trigger.sh'"
-    takeoff: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/takeoff.sh'"
-    back: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/back.sh'"
-    land: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/land.sh'"
-    panic: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id} 'cd ~/Diff-planner && ./sh_files/land.sh'"
+    trigger: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.31.76 'cd ~/Diff-planner && ./sh_files/pub_trigger.sh'"
+    takeoff: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.31.76 'cd ~/Diff-planner && ./sh_files/takeoff.sh'"
+    back: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.31.76 'cd ~/Diff-planner && ./sh_files/back.sh'"
+    land: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.31.76 'cd ~/Diff-planner && ./sh_files/land.sh'"
+    panic: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.31.76 'cd ~/Diff-planner && ./sh_files/land.sh'"
 
   # 贫机 MAVLink 轨（P0-② panic 双轨化，2026-09-24 落地）：机载零代码的
   # PX4+RTK 贫机无 ssh 通道，land/back/panic 经 gcs_mavlink_bridge.py
@@ -95,7 +104,7 @@ ops:
   # 写操作一律走上面 cmds（两段确认）。{args}=参数槽。
   # source 用 devel/setup.sh（POSIX）而非 setup.bash——登录 shell 是
   # zsh/bash 都通吃；远端命令含管道/重定向由 shlex.quote 整体保护。
-  debug_ssh: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.1.10{id}"
+  debug_ssh: "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new nv@192.168.31.76"
   debug_cmds:
     ping: "echo ok && hostname && uptime"
     ws: "ls -d ~/Diff* && ls ~/Diff-planner/sh_files/ | head"

@@ -41,7 +41,7 @@ class Hub(object):
                  logpath, view, status_path=None, bat_min=None,
                  bat_low_s=5.0, fence=None, scene_drops=None,
                  scene_pads=None, jump_thresh=3.0,
-                 sep_warn=2.5, sep_crit=1.2, cpa_t=2.5):
+                 sep_warn=2.5, sep_crit=1.2, cpa_t=2.5, fleet_hz=0.0):
         self.ids = [str(i) for i in ids]
         self.link_lost_s = link_lost_s
         self.stall_vel = stall_vel
@@ -59,6 +59,9 @@ class Hub(object):
         self.sep_crit = sep_crit
         self.cpa_t = cpa_t
         self.pair_on = {}   # (da,db) -> {"warn": False, "crit": False}
+        self.fleet_hz = fleet_hz   # >0 = 开 fleet 下行广播（真机邻机感知 2026-09-26）
+        self.fleet_socks = []      # 声明了 {"down":1} 的 agent 下行连接池
+        self.flock = threading.Lock()  # 连接池自持锁（不与遥测锁互相嵌套）
         self.lock = threading.Lock()
         self.st = {i: {"data": None, "rx_t": 0.0, "stall_t0": None,
                        "stall_on": False, "lost_on": True,
@@ -138,6 +141,67 @@ class Hub(object):
             self.logf.write(json.dumps(r, ensure_ascii=False) + "\n")
         if recs:
             self.logf.flush()
+
+    # ---- fleet 下行广播（真机邻机感知，2026-09-26） --------------------------
+    # nav 的 comms 契约：邻居状态走 /drone_<id>/odom_from_<s>（通信模型话题）。
+    # 真机各机独立 ROS master，跨机唯一链路是 hub——上行聚合的 fleet 快照
+    # 周期 sendall 回所有声明过 {"down":1} 的 agent 下行连接，agent 侧转 ROS。
+    # 只把下行兴趣连接入池（普通上行连接不读不收——TCP 缓冲塞满会拖垮广播环）。
+    def fleet_register(self, sock):
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+        with self.flock:
+            if sock not in self.fleet_socks:
+                self.fleet_socks.append(sock)
+
+    def fleet_unregister(self, sock):
+        with self.flock:
+            if sock in self.fleet_socks:
+                self.fleet_socks.remove(sock)
+
+    def fleet_broadcast(self):
+        """fleet 快照下行线程（--fleet-hz Hz；0=不启动）。
+
+        快照 = 活链路机的 pos/vel/yaw/phase + stage + 任务进度。单 socket
+        sendall 带超时（0.5s）：慢/死连接丢弃出池——agent 断线重连自带
+        新下行连接，池自愈；一连接卡顿不拖垮整环（半开连接教训）。
+        """
+        period = 1.0 / self.fleet_hz
+        while True:
+            now = time.time()
+            with self.lock:
+                fleet = {}
+                for did in self.ids:
+                    st = self.st[did]
+                    d = st["data"]
+                    if d is None or (st["rx_t"] and
+                                     now - st["rx_t"] > self.link_lost_s):
+                        continue
+                    fleet[did] = {"pos": d.get("pos"),
+                                  "vel": d.get("vel"),
+                                  "yaw": d.get("yaw"),
+                                  "phase": d.get("phase")}
+                snap = {"fleet_ts": round(now, 3), "stage": self.stage,
+                        "fleet": fleet}
+                if self.tasks:
+                    snap["tasks"] = dict(self.tasks)
+            line = (json.dumps(snap, separators=(",", ":")) + "\n") \
+                .encode("ascii")
+            with self.flock:
+                socks = list(self.fleet_socks)
+            dead = []
+            for s in socks:
+                s.settimeout(0.5)
+                try:
+                    s.sendall(line)
+                except Exception:
+                    dead.append(s)
+            if dead:
+                for s in dead:
+                    self.fleet_unregister(s)
+            time.sleep(period)
 
     # ---- FR-2.8 真机阶段推断 -----------------------------------------------
     def _infer_phase(self, d, pos, st):
@@ -599,10 +663,17 @@ class Handler(socketserver.StreamRequestHandler):
                 if not line:
                     continue
                 try:
-                    hub.on_msg(json.loads(line.decode("ascii")))
+                    obj = json.loads(line.decode("ascii"))
                 except Exception:
                     continue
+                # {"down":1} = agent 下行兴趣声明（fleet 广播入池；一行制，
+                # 声明后本连接不再上行数据）。普通遥测连接不入池。
+                if obj.get("down"):
+                    hub.fleet_register(self.request)
+                    continue
+                hub.on_msg(obj)
         finally:
+            hub.fleet_unregister(self.request)
             with hub.lock:
                 hub.conns -= 1
 
@@ -683,6 +754,9 @@ def main():
                     help="机间危险间距(m)")
     ap.add_argument("--cpa-t", type=float, default=2.5,
                     help="CPA 预判时窗(s)")
+    ap.add_argument("--fleet-hz", type=float, default=0.0,
+                    help="fleet 下行广播频率 Hz（真机邻机感知；0=关，"
+                         "sim 不用——sim 同 master 直接订阅）")
     args = ap.parse_args()
     logpath = "%s/gcs_telem_%s.jsonl" % (args.logdir,
                                          time.strftime("%Y%m%d_%H%M%S"))
@@ -696,14 +770,17 @@ def main():
               bat_low_s=args.bat_low_s, fence=fence, scene_drops=drops,
               scene_pads=pads, jump_thresh=args.jump_thresh,
               sep_warn=args.sep_warn, sep_crit=args.sep_crit,
-              cpa_t=args.cpa_t)
+              cpa_t=args.cpa_t, fleet_hz=args.fleet_hz)
     srv = Srv(("0.0.0.0", args.port), Handler)
     srv.hub = hub
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     threading.Thread(target=hub.watchdog, daemon=True).start()
     threading.Thread(target=hub.status_writer, daemon=True).start()
-    print("[hub] up port=%d ids=%s log=%s status=%s"
-          % (args.port, args.ids, logpath, status_path), flush=True)
+    if args.fleet_hz > 0:
+        threading.Thread(target=hub.fleet_broadcast, daemon=True).start()
+    print("[hub] up port=%d ids=%s log=%s status=%s fleet_hz=%.1f"
+          % (args.port, args.ids, logpath, status_path, args.fleet_hz),
+          flush=True)
     if args.view == "dash":
         print("\033[2J", end="", flush=True)
         hub.dash()

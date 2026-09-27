@@ -1,0 +1,286 @@
+# =============================================================================
+# settings_real.yaml — 真机部署版运行设置（2026-09-26 自 sim_settings.yaml 派生）
+# =============================================================================
+# 部署方式：拷到机载工作空间后**就地改名为 sim_settings.yaml**（zx2026_common/
+#   config/ 下覆盖）——cfg.load 硬编码文件名，零代码侵入；WSL 侧本文件是源模板。
+# 对齐纪律：sim_settings.yaml 改默认值时须 diff 本文件同步（键结构全量保留）。
+#
+# 与 sim_settings.yaml 的差异（仅 4 处行为差异，其余逐键同源）：
+#   ① use_sim_time: false          —— 真机墙钟，无 /clock
+#   ② closed_loop.drift_rate/max: 0 —— 定位误差是物理真实（LIO+EKF），不注入
+#      模拟漂移；est_pos=odom 恒等（nav_node 867-874 行 drift 恒零）
+#   ③ comms.enabled: true           —— 【契约开关】强制 nav 走 /drone_<id>/
+#      odom_from_<s> 邻居源（真机邻居状态经 hub fleet 下行→agent fleet-bridge
+#      转 ROS，等价 sim 通信模型话题语义，stale/expire 门照常）。
+#      注意：comm_model_node 不启动（本真机链路无注入延迟，该节点只服务 sim）
+#   ④ collision.recovery.enabled: false —— sim 碰撞事件源（world_node/gazebo
+#      monitor）真机不存在，机制空转无意义；真机碰撞=物理接触，兜底=RC 三通
+#      （6 通悬停/5 通接管/7 通锁桨）+ GCS panic 双轨。post_hit_calm/
+#      hazard_share 随事件源空转（键保留，勿删——sim 侧仍用）
+# 真值泄漏审计（真机必须全过）：
+#   closed_loop.enabled=true（点云闭环）✓ / mission.via_slots.source=cloud ✓ /
+#   color_id.source=camera（competition_rules 侧，部署时核对）✓
+# =============================================================================
+
+run_seed: 42                # rng 流（drift 关闭后仅余反应层抖动等次要消费者）
+
+# ---- 物理后端 ----------------------------------------------------------------
+# 真机不启动任何物理后端：动力学由 PX4+px4ctrl 承担，控制输入=vel_bridge
+# 注入 /position_cmd。以下段保留只为键结构对齐（真机代码路径不读）。
+backend: cascade_pid
+kinematic:
+  yaw_rate_max: 1.5
+cascade_pid:
+  pos_kp: [1.2, 1.2, 1.5]
+  vel_kp: [2.0, 2.0, 2.5]
+  vel_kd: [0.6, 0.6, 0.4]
+  max_tilt_deg: 30.0
+  max_vel: 2.5
+gazebo:
+  host: 127.0.0.1
+  port: 11345
+
+# ---- 导航规划 ----------------------------------------------------------------
+nav:
+  resolution: 0.5          # A* 栅格分辨率 (m)——真机云累积同款栅格
+  inflation: 0.4           # 【0.4 定论】勿动（batch1 判词：0.9 绕行超窗 3/3 FAIL）
+  separation_radius: 1.5   # 多机防撞分离半径 (m)
+  separation_gain: 3.5
+  metrics:
+    enabled: true          # P0 指标埋点：机载落盘 run_logs/（法证资产，保留）
+
+# ---- Boids 群集（真机主战场：分离+对齐+聚合+obs_guard 全默认开） ---------------
+swarm:
+  enabled: true
+  alignment_gain: 0.4
+  cohesion_gain: 0.2
+  perception_radius: 8.0
+  z_band: 0.5
+  min_z: 2.0
+  obstacle_scale: true
+  obs_guard:               # W1 三旗（matrix_w1b 12/12 定谳）——真机必须保留
+    enabled: true
+  rescue_quiet:
+    enabled: true
+    ramp_s: 2.5
+
+# ---- 任务层 ------------------------------------------------------------------
+mission:
+  via_slots:
+    enabled: true
+    source: cloud          # 【真机唯一合法值】槽位净空查本机点云占用格；
+                           # truth 模式=真值泄漏，部署后必须复核此项
+    slot_clear: 1.5
+    slot_sep: 2.5
+    assign: drop_y
+    zone_margin: 1.0
+  return_route:
+    enabled: false         # W2-P1 v1 判毙保持关
+
+# ---- 闭环感知规划 --------------------------------------------------------------
+closed_loop:
+  enabled: true            # 点云闭环（真机唯一模式：SLAM 累积栅格+est 位姿）
+  halt_on_landed: true     # 终态机退出分离场（pads 1.5m<sep 半径教训）
+  drift_rate: 0.0          # 【真机差异②】不注入模拟漂移——est=odom 恒等，
+                           # 真实定位误差由 LIO+EKF 物理承担
+  drift_max: 0.0           # 同上（drift 向量恒零，dam 系 ero 自然归零）
+  lidar_top_blind: true    # 顶盲锥为 sim 传感模拟参数，nav 不消费（无害保留）
+  replan_hz: 10
+  max_vel: 1.8             # 闭环巡航限速 (m/s)——真机首飞建议先 1.2 保守档
+  arrive_tol: 0.4
+  arrive_tol_low_z: 0.15
+  arrive_tol_low_z_max: 1.5
+  arrive_tol_est: 0.10
+  temporal_consistency:
+    enabled: false         # 默认关保持（风场压测时与 wind 同开）
+    stick_s: 1.5
+    flip_window_s: 2.0
+    flip_rate_max: 0.6
+    bias_gain: 0.35
+    unlock_clearance: 1.5
+    max_lock_s: 6.0
+  drift_aware_margin:
+    enabled: false         # dam v1/v2 判死保持；真机重评条件未触发
+    deep_r: 0.7
+  near_stop_zone:
+    enabled: true          # 平台上空精降新形态已翻默认（run6 六起 z=0.35 级联）
+    zone_r: 1.0
+    deadband: 0.2
+    scale_min: 0.25
+  collapse_guard:
+    enabled: true          # W3 默认开保持
+    min_cmd: 0.3
+    floor_speed: 0.8
+    min_target: 0.75
+    dgoal_min: 1.5
+    clear_min: 1.0
+  cloud_avoidance:
+    sign_fix: true         # W5 默认开保持（逃离惩罚吸引子根除）
+  rescue_mutex:
+    enabled: true          # W2 默认开保持（de/gs 双救援互斥）
+  bounce_corridor:
+    enabled: true
+    corridor_w: 1.0
+  post_hit_calm:
+    enabled: true          # W7-C1（事件源空转无害——见头部差异④说明）
+    hold_s: 3.0
+    vcap: 0.8
+    vcap_s: 2.0
+  hazard_share:
+    enabled: true          # W7-C2 舰队危险格广播（真机跨 WiFi 话题照常）
+    topic: /zx2026/hazard_cells
+  sep_obs_guard:
+    enabled: true          # 734 碰撞主因治理，真机必须保留
+  hotspot_inflate:
+    enabled: false         # 判毙保持（改道挤邻树）
+    extra_cells: 1
+    trees: [[-12.2,6.1], [9.2,5.7], [-8.4,1.5], [4.2,3.2], [12.1,2.6],
+            [1.1,2.0], [8.0,1.9], [13.0,6.8], [4.7,-1.7], [-7.9,5.9],
+            [5.4,6.8], [-4.3,1.8], [9.0,-2.6]]
+  boundary_margin:
+    enabled: true          # W2-P2 z-aware 反应层，默认开保持
+  vo_avoid:
+    enabled: false         # W6 默认关保持（seed47 三体回归未解）
+    engage_r: 3.5
+    safe_r: 1.1
+    t_pred: 3.0
+    gain: 1.2
+    max_push: 1.0
+    stale_s: 0.5
+  deadend_escape:
+    enabled: true          # P3 三层逃逸，真机密林必留
+    confirm_s: 0.5
+    dwell_s: 1.2
+    speed: 0.6
+    ray_len: 3.0
+    n_dirs: 16
+    pierce_cells: 8
+    free_need: 3
+    goal_bias: 1.5
+    goal_stall_s: 3.0
+    goal_speed: 0.8
+    goal_max_s: 10.0
+    cloud_clear_r: 1.0
+    exit_hyst_s: 2.5       # P5 退出迟滞
+  point_cache:
+    enabled: false         # P4 默认关保持
+    ttl_s: 45.0
+  veto_gate:
+    enabled: false         # P2 默认关保持
+    t_react: 0.2
+    a_brake: 2.5
+    margin: 0.3
+    lateral_margin: 0.1
+    ray: 2.5
+    scale_min: 0.35
+  # ---- 真机树枝避障 O1-O5（本段为真机而设计，全部保留） ------------------------
+  branch_handling:
+    enabled: true
+    map_z_band: [2.05, 2.60]   # 【现场定谳 2026-09-27】2m 以下灌木丛——带下沿抬到
+                               #   灌木顶+0.05：灌木证据出图（巡航 2.4 物理不撞，
+                               #   z 漂移 0.3 账：2.4-0.3=2.1>2.0 ✓），A* 不绕灌木；
+                               #   树干/围栏 2.05-2.6 段仍进图封格；硬不变量改写：
+                               #   带下限>灌木顶 2.0，带上限<冠下缘（真场冠底到场实测）
+    evidence:
+      window_s: 1.5
+      thresh_near: 2
+      thresh_far: 4
+      trust_r: 5.0
+    uncertain:
+      enabled: true
+      v_max: 0.6
+      margin: 0.3
+      lat_margin: 0.15
+      ray: 4.0
+    sway_dense_factor: 3.0
+    ca_height_extra: 0.3
+    ca_react_extra: 0.6
+    ca_z_floor: 0.5
+    contact_mark: false       # WaveB ① pilot 保持关
+    contact_radius: 0.65
+    contact_ttl_s: 12.0
+    cloud_mem_frames: 6       # ②梢记忆 6 帧（记忆窗≥反应窗穿越 0.41s 定量律；
+                              #   真机 Mid-360 20000 点/帧，密度远超 sim 悲观值）
+    ca_iso_floor: 0.0         # ③ pilot 保持关
+    tip_slow:
+      enabled: false          # W7-C3 pilot 未跑保持关
+      z_band: [0.70, 2.60]
+      cone_deg: 35
+      engage_r: 2.5
+      margin: 0.5
+      react_t: 0.41
+      min_pts: 2
+      floor_frac: 0.35
+
+# ---- 仿真树枝层 ----------------------------------------------------------------
+branches:
+  enabled: false            # 杨树林外部 SDF 契约保持关（现役科目三网格场景恢复
+                            # true 回旧行为）
+
+# ---- 碰撞恢复 ----------------------------------------------------------------
+collision:
+  recovery:
+    enabled: false          # 【真机差异④】无碰撞事件源，机制空转；兜底=RC 三通
+                            # + GCS panic 双轨。真机"碰撞"由人判定，无自动弹开。
+    bounce_dt: 1.0
+    cooldown_dt: 2.0
+    bounce_vel: 2.0
+    max_collisions: 8
+    lock_cmd: true
+    park_ground_skip: true
+    low_bounce_up: true
+    fence_events: false
+
+# ---- 传感器噪声（sim 传感模拟参数，world 侧消费；真机 nav 不读，保留对齐） ----
+sensor:
+  lidar:
+    range_noise_std: 0.02
+    dropout_rate: 0.05
+    angular_noise_deg: 0.5
+    false_positive_rate: 0.0
+    lissajous: true
+  tag:
+    range_noise_std: 0.05
+    false_negative_rate: 0.05
+  camera:
+    fps: 12
+    width: 320
+    height: 240
+    vfov_deg: 95.0
+    gain_std: 0.06
+    pixel_noise_std: 6.0
+    dropout_rate: 0.02
+    render_crowns: false
+
+# ---- 时间管理 ----------------------------------------------------------------
+world_dt: 0.01
+control_dt: 0.05
+publish_dt: 0.05
+use_sim_time: false         # 【真机差异①】墙钟；roscore 无 /clock
+
+# ---- 风场模型 ----------------------------------------------------------------
+# 真机风是物理真实且不可关。wind.enabled 只控制 sim 注入与 nav 风前馈（feedforward
+# 需风估计源，真机暂无）——**场地持续风 >0.8 m/s 须停飞**（投放到位阈值 0.8m 的
+# 硬约束，settings 注释原文）。
+wind:
+  enabled: false
+  mean: [0.0, 0.0]
+  gust_std: 0.4
+  gust_timescale_s: 4.0
+  turb_std: 0.25
+  turb_timescale_s: 1.0
+  tau_aero: 0.6
+  feedforward: 1.0
+
+# ---- 通信模型 ----------------------------------------------------------------
+comms:
+  enabled: true             # 【真机差异③】契约开关：nav 邻居走 odom_from_<s>。
+                            # comm_model_node 不启动——延迟=hub 链路真实延迟
+                            # （100ms 级），expire 门=nav 侧 expire_s 语义。
+  latency_ms: 100
+  latency_jitter_ms: 40
+  dropout_rate: 0.02
+  burst_prob: 0.002
+  burst_len: [3, 10]
+  expire_s: 2.0             # 邻居过期时间 (s)——真机 WiFi 抖动下该值的实测
+                            # 调校=联调日新增项

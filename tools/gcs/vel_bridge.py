@@ -54,6 +54,21 @@ def clamp_v(v, vmax, wz, wmax):
     return v, max(-wmax, min(wmax, wz))
 
 
+def world_to_local(v, yaw0):
+    """ENU 世界系速度 → LIO 局部系（真机适配 2026-09-26）。
+
+    vel_cmd 是 ENU 世界系（nav 输出），而 odom/px4ctrl/traj_server 全链局部系
+    ——前视点 pos=odom+v*look 的加法必须同系。旋转角取 -yaw0（yaw0=LIO 系
+    x 轴相对 ENU 东向偏角）；平移 ex0/ny0 与偏置 c 不参与（位置加法在系内
+    自洽，HOLD 锚点同）。yaw_dot 是速率标量，yaw0 常数下两系相等不转。
+    yaw0=0 恒等零开销（sim 后端）。
+    """
+    if yaw0 == 0.0:
+        return v
+    c, s = math.cos(-yaw0), math.sin(-yaw0)
+    return (v[0] * c - v[1] * s, v[0] * s + v[1] * c, v[2])
+
+
 class BridgeLogic(object):
     """状态机 IDLE/ACTIVE/HOLD，纯函数化便于 --selftest（无 ROS 依赖）。"""
 
@@ -148,6 +163,9 @@ def main():
     ap.add_argument("--out", default="/position_cmd")
     ap.add_argument("--max-vel", type=float, default=2.0)
     ap.add_argument("--max-yaw-dot", type=float, default=1.0)
+    ap.add_argument("--yaw0-deg", type=float, default=0.0,
+                    help="LIO 系 x 轴相对 ENU 东向偏角（与 odom_tf 同源参数，"
+                         "vel_cmd ENU→局部系旋转；0=恒等 sim 用）")
     ap.add_argument("--rate", type=float, default=50.0)
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
@@ -163,6 +181,7 @@ def main():
     from geometry_msgs.msg import Twist
     rospy.init_node("vel_bridge_%d" % args.id)
     logic = BridgeLogic(args.max_vel, args.max_yaw_dot)
+    yaw0 = math.radians(args.yaw0_deg)
     state = {"yaw": 0.0}
     import nav_msgs.msg as nm
 
@@ -176,7 +195,8 @@ def main():
         logic.on_odom(rospy.get_rostime().to_sec())
 
     def on_cmd(m):
-        logic.on_cmd((m.linear.x, m.linear.y, m.linear.z, m.angular.z),
+        v = world_to_local((m.linear.x, m.linear.y, m.linear.z), yaw0)
+        logic.on_cmd((v[0], v[1], v[2], m.angular.z),
                      rospy.get_rostime().to_sec())
 
     rospy.Subscriber("/drone_%d/vel_cmd" % args.id, Twist, on_cmd, queue_size=5)

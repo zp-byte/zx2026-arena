@@ -1,0 +1,70 @@
+# =============================================================================
+# missions.yaml — 真机任务指派文件（mission_loader.py 消费，赛前人工改）
+# =============================================================================
+# 单文件含全部机；每机 mission_loader 按自己的 --id 取对应条目，缺条目=
+# 该机 mission_loader 启动失败（宁可不飞也不带错飞——故每机一条必须齐）。
+# 字段语义（对齐 task_generator_node 科目三口径）：
+#   payload    本机载荷类型 TYPE_A..TYPE_E（每类 2 机：i%类型数 同款分配）
+#   box_color  本机箱色 red/blue/yellow（须与 scene color_map 一致）
+#   drop       参考投放平台号（闭环 color_id 下仅审计用，执行器不据此导航；
+#              无参考填 -1）
+#   marker     参考平台 tag 标识（可空 ""）
+#   takeoff    [e, n, hover_z] 场地 ENU（米）——pad 实测坐标赛前填
+#   cruise_z   穿越区平飞高度（RECON latch 定谳 1.2 档；勿回 1.8）
+#   max_vel    该机速度上限（vel_bridge 与 nav 双消费；首飞 1.2 保守档）
+#   seq        全局任务序号（同一起飞批次同值）
+missions:
+  - drone: 0
+    payload: TYPE_A
+    box_color: red
+    drop: 1
+    marker: P1
+    takeoff: [0.0, 0.0, 1.5]
+    cruise_z: 1.2
+    max_vel: 1.2
+    seq: 1
+  - drone: 1
+    payload: TYPE_A
+    box_color: red
+    drop: 2
+    marker: P2
+    takeoff: [1.0, 0.0, 1.5]
+    cruise_z: 1.2
+    max_vel: 1.2
+    seq: 1
+  - drone: 2
+    payload: TYPE_B
+    box_color: blue
+    drop: 3
+    marker: P3
+    takeoff: [2.0, 0.0, 1.5]
+    cruise_z: 1.2
+    max_vel: 1.2
+    seq: 1
+  - drone: 3
+    payload: TYPE_B
+    box_color: blue
+    drop: 1
+    marker: P1
+    takeoff: [3.0, 0.0, 1.5]
+    cruise_z: 1.2
+    max_vel: 1.2
+    seq: 1
+  - drone: 4
+    payload: TYPE_C
+    box_color: yellow
+    drop: 2
+    marker: P2
+    takeoff: [4.0, 0.0, 1.5]
+    cruise_z: 1.2
+    max_vel: 1.2
+    seq: 1
+  - drone: 5
+    payload: TYPE_C
+    box_color: yellow
+    drop: 3
+    marker: P3
+    takeoff: [5.0, 0.0, 1.5]
+    cruise_z: 1.2
+    max_vel: 1.2
+    seq: 1

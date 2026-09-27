@@ -24,6 +24,12 @@ sim 没有而真云必有的形态：
 发布 ≤out_rate（默认 10Hz）跟随源频率，帧号透传；odom 断 >0.5s 停发
 （无锚就没法做相对滤——宁缺勿幻影）。
 
+坐标变换（2026-09-26）：四道滤在 LIO 局部系做（半径围绕自机自洽），输出前
+经 PoseTF（odom_tf 同款，--yaw0-deg/--ex0/--ny0）转到场地 ENU——nav 用
+odom_enu（ENU 位姿）配点云建图，点云必须同帧，否则建图整体错位。变换不
+做 auto_origin 采样（千点/帧会污染静止窗），用 odom_tf 独立实例的同源采样
+结果（同数据同逻辑=同结果）。yaw0=0 且 ex0=ny0=0 时恒等快路径零开销。
+
 topic 名现场可改：--src /cloud_registered（faster_lio 默认名；profile
 grid_cloud TODO 现场定谳后同步 profile_real_lio.yaml）。
 自检：python3 cloud_adapter.py --selftest（无 ROS 可跑，逻辑 8 检）
@@ -131,6 +137,10 @@ def main():
     ap.add_argument("--voxel", type=float, default=0.15)
     ap.add_argument("--max-points", type=int, default=1200)
     ap.add_argument("--rate", type=float, default=10.0)
+    ap.add_argument("--yaw0-deg", type=float, default=0.0,
+                    help="LIO 系→ENU 旋转（odom_tf 同源参数，0=恒等）")
+    ap.add_argument("--ex0", type=float, default=0.0)
+    ap.add_argument("--ny0", type=float, default=0.0)
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
     if args.selftest:
@@ -142,6 +152,10 @@ def main():
     out_t = args.out or "/drone_%d/cloud" % args.id
     rospy.init_node("cloud_adapter_%d" % args.id)
     flt = CloudFilter(args.range, voxel=args.voxel, max_points=args.max_points)
+    import odom_tf as otf
+    tf = otf.PoseTF(args.yaw0_deg, args.ex0, args.ny0, auto=False)
+    tf_on = not (args.yaw0_deg == 0.0 and args.ex0 == 0.0
+                 and args.ny0 == 0.0)
     st = {"pc": None, "frame": "world", "odom": None, "t_odom": None,
           "t_pc": None, "warned": False}
 
@@ -171,6 +185,13 @@ def main():
         if m is None or now - st["t_pc"] > 1.0:
             return
         pts = flt.filter(parse_xyz(m), st["odom"])
+        if tf_on:
+            # LIO 局部系→ENU（nav 的 odom_enu 同帧；z 不转）
+            out = []
+            for (x, y, z) in pts:
+                ex, ny = tf.point(x, y)
+                out.append((ex, ny, z))
+            pts = out
         o = PointCloud2()
         o.header.stamp = m.header.stamp
         o.header.frame_id = st["frame"]

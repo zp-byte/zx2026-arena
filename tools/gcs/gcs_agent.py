@@ -12,6 +12,10 @@
 用法：
   机载:  python3 gcs_agent.py --profile profile_real_lio.yaml
   仿真:  python3 gcs_agent.py --profile profile_sim.yaml
+  真机邻机感知: 加 --fleet-bridge（下行第二连接收 hub fleet 快照，转 ROS：
+    邻居 → /drone_<id>/odom_from_<s>（nav comms 契约）；stage → /zx2026/state
+    （仅本机无本地 stage 源时，防回声倒退竞态）；他机任务进度 →
+    /zx2026/task_update）
 """
 import argparse
 import base64
@@ -60,6 +64,15 @@ class Agent(object):
             or self.tf_auto)
         self.tf_acc = {i: {"buf": [], "c": (0.0, 0.0), "locked": False,
                            "gave_up": False} for i in self.ids}
+        # fleet 下行桥（--fleet-bridge，真机邻机感知 2026-09-26）：独立第二
+        # TCP 连接（上行只发不收——复用同一 socket 做收发会让 sender 死等），
+        # 收 hub fleet 快照转 ROS。惰性建 pub（单 fleet 线程内，无竞态）。
+        self.fleet_bridge = False
+        self.fleet_pubs = {}
+        self.stage_echo_pub = None
+        self.stage_echo_last = None
+        self.task_pub = None
+        self.task_ok = None   # None=未探测；False=zx2026_common 缺失已降级
 
     @staticmethod
     def _blank():
@@ -419,6 +432,118 @@ class Agent(object):
                 "x0": gx0 * res, "y0": gy0 * res,
                 "rle": Agent._rle_encode(cells)}
 
+    # ---- fleet 下行桥（--fleet-bridge，真机邻机感知 2026-09-26） ------------
+    # nav comms 契约：comms.enabled 时邻居订阅 /drone_<id>/odom_from_<s>，
+    # 新鲜度按到达时刻判（nav_node._on_neighbor 用 rospy.get_time()，不读
+    # header.stamp）——转发时戳用当前时刻即可，expire 门由 nav 侧管。
+    def spin_fleet(self):
+        host, port = self.cfg["server"]
+        while not rospy.is_shutdown():
+            try:
+                sock = socket.create_connection((host, port), timeout=3.0)
+                sock.sendall(b'{"down":1}\n')   # 下行兴趣声明（hub 入池凭据）
+                rospy.loginfo("gcs_agent: fleet downlink up %s:%d", host,
+                              port)
+                buf = b""
+                while not rospy.is_shutdown():
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        raise IOError("closed by hub")
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        if not line.strip():
+                            continue
+                        try:
+                            self.on_fleet_line(
+                                json.loads(line.decode("ascii")))
+                        except Exception:
+                            continue
+            except Exception as e:
+                rospy.logwarn_throttle(
+                    5.0, "gcs_agent: fleet downlink down (%s), retry 3s", e)
+                time.sleep(3.0)
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def on_fleet_line(self, obj):
+        now = rospy.get_rostime()
+        # 邻居状态 → odom_from_<s>（为本 master 的每架机各发一份；sim 单
+        # master 全员直订 /drone_<j>/odom，不走本桥）
+        fleet = obj.get("fleet") or {}
+        for did, d in fleet.items():
+            if did in self.ids:
+                continue
+            pos = d.get("pos")
+            if not pos or len(pos) < 3:
+                continue
+            v = d.get("vel") or [0.0, 0.0, 0.0]
+            yaw = math.radians(float(d.get("yaw") or 0.0))
+            half = yaw * 0.5
+            for me in self.ids:
+                m = Odometry()
+                m.header.stamp = now
+                m.header.frame_id = "world"
+                m.child_frame_id = "drone_%s" % did
+                m.pose.pose.position.x = float(pos[0])
+                m.pose.pose.position.y = float(pos[1])
+                m.pose.pose.position.z = float(pos[2])
+                m.pose.pose.orientation.z = math.sin(half)
+                m.pose.pose.orientation.w = math.cos(half)
+                m.twist.twist.linear.x = float(v[0])
+                m.twist.twist.linear.y = float(v[1])
+                m.twist.twist.linear.z = float(v[2])
+                self._fleet_pub(me, did).publish(m)
+        # 全局阶段机回声：仅本机无本地 stage 源时转发（profile topics.stage
+        # 为 null）。1 号机跑 stage_controller 本地直发——回声会把滞后旧值
+        # 倒灌回订户（阶段倒退竞态），必须跳过。
+        stage = obj.get("stage")
+        if stage and not self.tp.get("stage"):
+            if self.stage_echo_pub is None:
+                self.stage_echo_pub = rospy.Publisher(
+                    "/zx2026/state", String, queue_size=1, latch=True)
+            if stage != self.stage_echo_last:
+                self.stage_echo_pub.publish(String(str(stage)))
+                self.stage_echo_last = stage
+        # 他机任务进度 → /zx2026/task_update（halt_on_landed 的落地机集合；
+        # 本机进度由本地 mission_executor 直发，跳过防重复）
+        tasks = obj.get("tasks") or {}
+        if tasks and self.task_ok is not False:
+            if self.task_pub is None:
+                try:
+                    from zx2026_common.msg import TaskUpdate as TaskMsg
+                except ImportError:
+                    rospy.logwarn("gcs_agent: zx2026_common.msg 不可用 — "
+                                  "fleet task 转发降级关闭")
+                    self.task_ok = False
+                    return
+                self.task_ok = True
+                self.task_cls = TaskMsg
+                self.task_pub = rospy.Publisher("/zx2026/task_update",
+                                                TaskMsg, queue_size=5)
+            for did, t in tasks.items():
+                if did in self.ids:
+                    continue
+                m = self.task_cls()
+                m.drone_id = int(did)
+                m.payload_type = str(t.get("payload", ""))
+                m.drop_point_id = int(t.get("drop", 0))
+                m.mission_state = str(t.get("state", ""))
+                m.drop_ok = int(t.get("drop_ok", 0))
+                self.task_pub.publish(m)
+
+    def _fleet_pub(self, me, did):
+        key = (me, did)
+        p = self.fleet_pubs.get(key)
+        if p is None:
+            p = rospy.Publisher("/drone_%s/odom_from_%s" % (me, did),
+                                Odometry, queue_size=5)
+            self.fleet_pubs[key] = p
+        return p
+
     # ---- TCP 发送（client 主动连地面站，断线重连，只发最新快照） ----------
     def spin_sender(self):
         host, port = self.cfg["server"]
@@ -492,6 +617,9 @@ class Agent(object):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", required=True)
+    ap.add_argument("--fleet-bridge", action="store_true",
+                    help="开启 fleet 下行桥（真机邻机感知：hub 快照→"
+                         "odom_from_<s>/zx2026/state/task_update）")
     args = ap.parse_args()
     with open(args.profile, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -509,10 +637,13 @@ def main():
     else:
         sys.exit("gcs_agent: no ROS master in 20min")
     a = Agent(cfg)
+    a.fleet_bridge = bool(args.fleet_bridge)
     a.spin_ros()
     threading.Thread(target=a.spin_sender, daemon=True).start()
-    rospy.loginfo("gcs_agent: up ids=%s -> %s:%d", a.ids, host,
-                  cfg["server"][1])
+    if a.fleet_bridge:
+        threading.Thread(target=a.spin_fleet, daemon=True).start()
+    rospy.loginfo("gcs_agent: up ids=%s -> %s:%d fleet_bridge=%s", a.ids,
+                  host, cfg["server"][1], a.fleet_bridge)
     rospy.spin()
 
 

@@ -1,0 +1,125 @@
+# =============================================================================
+# competition_rules_real.yaml — 科目三 真机比赛细则（非凸α 实机，2026-09-26）
+# =============================================================================
+# 部署：deploy_real.sh 拷机载换名 src/zx2026_common/config/competition_rules.yaml
+#（executor/nav 均 cfg.load 硬编码文件名）。WSL sim 跑 config/ 原文件，本文件
+# 不影响仿真一分。
+# 与 sim 版差异四处：time_limit 1500 / heights 真机链 / geofence 真场 /
+# return_through_forest false。其余块与 sim 逐字同源，改 sim 细则时同步。
+# =============================================================================
+
+time_limit_s: 1500         # 真机规则原文 25 分钟=1500s（sim 压缩口径 180 勿带上机）
+phase_timeout_s: 60        # P3 起飞阶段超时（含错峰延迟）
+takeoff_stagger_s: 3.0     # 多机错峰起飞间隔(s)：drone i 延迟 i*stagger
+entry_stagger_s: 2.5       # P4 进入错峰间隔(s)：drone i 延迟 i*stagger
+return_stagger_s: 3.0      # 返航错峰间隔(s)：drone i 投放后延迟 i*stagger 再返航
+
+# ---- 飞行高度约定（真机链，用户定谳 2026-09-26：平台贴地，1.5=释放悬停高） ----
+heights:
+  takeoff_hover_z: 1.5     # 起降区悬停
+  cruise_z: 2.4            # 【现场定谳 2026-09-27】场地 2m 以下有灌木丛——巡航提到
+                           # 灌木顶+0.4 裕度；RECON 扫描带自动 [1.9,2.9]、返航悬停
+                           # 同步升高（顺带消 RECON 贴线病灶）；投放段 identify/
+                           # drop 保持 1.9/1.5（投放点现场清障区）
+  identify_z: 1.9          # 投放点正上方识别/缓冲高度 = hover 1.5 + 0.4
+                           #（与 sim 0.8+0.4=1.2 同一缓冲律）
+  flight_z_ceiling: 4.5    # nav goal z 钳位（0=不钳）；距 OVER_HEIGHT 5.0 保 0.5m
+  drop_hover_z: 1.5        # 【用户定谳 2026-09-26】释放悬停高度=1.5。
+                           # 注意：sim 旧注释曾记"真机按规则原文 50~60cm 复核"，
+                           # 已被本口径取代；若比赛规则原文确限 0.55，只改这一行
+  drop_hover_tol: 0.62     # 精投放到位阈值(m)（sim 定谳值沿用；真机 LIO 漂移
+                           # 预期小于 sim 注入漂移，只松不紧）
+  drop_release_tol: 0.35   # 释放对准门阈值(m)
+  drop_align_timeout_s: 6.0  # 对准兜底放行(s)
+  drop_mid_z: 1.70         # GOTO_LO 中继高度：1.9→1.7→1.5 三段 ~0.2m 温和递降
+                           # 消 P 环过冲（与 sim 同律）；<=0 退回两段
+  drop_arrival_tol: 0.8    # 投送平台水平到位阈值(m)
+  area_arrival_tol: 2.0    # 区域到位阈值(m)
+
+# ---- 颜色识别闭环（规则口径：平台色-类型对应赛前不告知） -----------------------
+color_id:
+  enabled: true
+  source: camera           # 真机 D435 下视相机 HSV（color_detector 通用件同码）
+  scan_dwell_s: 2.0
+  min_conf: 0.8
+  n_frames: 3
+  max_scan_rounds: 2
+  scan_leg_timeout_s: 45
+  settle_gate: true
+  settle_window_s: 0.8
+  settle_tol_m: 0.10
+  arrive_gate: true
+  camera_detector:         # image_topic 走 real_fleet.launch camera_topic 参数；
+                           # hsv 初值沿用 sim 标定，真机按光照重标（D435 现场标定项）
+    image_topic: camera/image_raw
+    stale_s: 0.4
+    min_blob_area_px: 40
+    hsv:
+      red_lo1: 0
+      red_hi1: 8
+      red_lo2: 172
+      red_hi2: 179
+      blue_lo: 100
+      blue_hi: 115
+      yellow_lo: 20
+      yellow_hi: 35
+      s_min: 120
+      v_min: 80
+    conf:
+      w_circularity: 0.6
+      w_purity: 0.4
+      w_area: 0.0
+      area_floor_px: 40
+
+# ---- 运动限制 ---------------------------------------------------------------
+motion:
+  default_max_vel: 2.0
+  default_max_acc: 4.0
+  cruise_above_canopy: true
+
+# ---- 类型匹配安全策略 ---------------------------------------------------------
+type_match:
+  min_confidence: 0.8
+  consecutive_frames: 3
+  hover_timeout_s: 12.0
+  unknown_tag_policy: ignore
+  position_gate: true
+
+# ---- 投放点 Tag 检测参数 ------------------------------------------------------
+tag_detection:
+  tag_range: 4.0
+  fov_deg: 60.0
+  occlusion: true
+
+# ---- 计分（科目三比赛口径：S = S1 + S2，满分 100；机载只作内部指标） -----------
+score:
+  s1_per_correct: 10
+  s1_cap: 60
+  s2_ladder:
+    6: 40
+    5: 30
+    4: 25
+    3: 15
+    2: 10
+    1: 5
+    0: 0
+  drop_tol_m: 0.6         # 平台投影判平台半径（平台直径 1.2m——真机平台尺寸实测后复核）
+  wrong_drop_penalty: 0
+tiebreak: [total_score, completion_time, first_correct_drop_time]
+
+# ---- 合规监视（rule_monitor，P5：退赛条款） ----------------------------------
+rule:
+  enabled: true
+  # 真场围栏网在 0/50 边界线上；内缘外扩 0.35（与 sim 同律：face+0.35）
+  geofence: [[-0.35, -0.35], [50.35, -0.35], [50.35, 50.35], [-0.35, 50.35]]
+  out_of_bounds_grace_s: 10.0
+  ground_contact_z: 0.30
+  unauthorized_landing_grace_s: 1.5
+  max_height_m: 5.0
+  height_grace_s: 2.0
+  return_through_forest: false   # 真场无林带（返航走廊推导依赖树林外接框，关）
+  corridor_margin_m: 1.0
+  return_corridor: []
+  retire_on_corridor_miss: false
+  retire_score_keep: true
+  selftest_inject: false
