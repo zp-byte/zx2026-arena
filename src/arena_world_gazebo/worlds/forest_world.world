@@ -80,6 +80,14 @@
     <visual name="vis"><geometry><box><size>60.90 0.30 2.80</size></box></geometry><material><ambient>0.31 0.42 0.27 1.00</ambient><diffuse>0.31 0.42 0.27 1.00</diffuse><specular>0.2 0.2 0.2 1</specular></material></visual>
   </link>
 </model>
+<model name="net_207">
+  <static>true</static>
+  <pose>-22.80 8.00 1.25 0 0 0</pose>
+  <link name="link">
+    <collision name="col"><geometry><box><size>0.10 8.00 2.50</size></box></geometry></collision>
+    <visual name="vis"><geometry><box><size>0.10 8.00 2.50</size></box></geometry><material><ambient>0.20 0.45 0.22 0.45</ambient><diffuse>0.20 0.45 0.22 0.45</diffuse><specular>0.2 0.2 0.2 1</specular></material></visual>
+  </link>
+</model>
 <model name="tree_0">
   <static>true</static>
   <pose>-23.260 -28.360 0 0 0 4.654</pose>

@@ -336,6 +336,20 @@ def fence_models():
     return models
 
 
+def net_model(ob):
+    """kind=net 垂直屏障网→绿色半透明薄板（2026-09-27 勘察视频定谳：林缘
+    遮阳网顶高≈2-3m）。单一事实源=scene_topology.yaml static_obstacles；
+    collision 开=接触判罚+LiDAR 可见（v1 规划层验证；真机 Mid360 对网
+    结构性失明，盲态由装订禁行兜底，见 scene_topology net 段注）。"""
+    lo, hi = ob.lo, ob.hi
+    cx, cy = (lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0
+    sx = max(hi[0] - lo[0], 0.05)
+    sy = max(hi[1] - lo[1], 0.05)
+    sz = hi[2] - lo[2]
+    return thin_box_model("net_%d" % ob.id, cx, cy, lo[2], sx, sy, sz,
+                          (0.20, 0.45, 0.22), alpha=0.45, collision=True)
+
+
 # ---------------------------------------------------------------------------
 # 主构建流程
 # ---------------------------------------------------------------------------
@@ -362,6 +376,13 @@ def build():
     out.extend(takeoff_pad_model())
     out.extend(crossing_zone_models())
     out.extend(fence_models())
+
+    # 垂直屏障网（static_obstacles kind=net；z 带外 A* 自动放行=过顶分界）
+    n_net = 0
+    for ob in scene.obstacles:
+        if ob.kind == "net":
+            out.append(net_model(ob))
+            n_net += 1
 
     # 树/灌木（table 场景=杨树 mesh 视觉；旧场景=圆柱树）
     n_tree = n_bush = 0
@@ -390,8 +411,8 @@ def build():
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
         f.write("\n".join(out))
-    print("wrote %s  (trees=%d bushes=%d pads=%d drops=%d drones=%d)" %
-          (OUT, n_tree, n_bush, len(scene.get_pads()),
+    print("wrote %s  (trees=%d bushes=%d nets=%d pads=%d drops=%d drones=%d)" %
+          (OUT, n_tree, n_bush, n_net, len(scene.get_pads()),
            len(scene.drop_points), len(scene.get_pads())))
 
 
